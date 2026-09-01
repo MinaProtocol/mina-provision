@@ -1,0 +1,54 @@
+name: Release
+
+# Fires on a vX.Y.Z tag. Builds a static binary per architecture, packages
+# each as a .deb, and attaches everything to a GitHub Release.
+#
+# Publishing to the APT repositories is deliberately out of scope here: it
+# needs S3 credentials and a signing key as repository secrets, and warrants
+# its own change. Until then the .deb is installed from the Release asset.
+
+on:
+  push:
+    tags: [ 'v*' ]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Derive the version from the tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binaries and packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath \
+              -ldflags="-s -w -X main.version=${VERSION}" \
+              -o "dist/mina-provision-linux-${arch}" .
+            packaging/build-deb.sh "dist/mina-provision-linux-${arch}" "$VERSION" "$arch" dist
+          done
+          ls -l dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/mina-provision-linux-*
+            dist/*.deb

@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Daily, to notice a published artifact moving before an operator does.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: vet + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./... -v
+
+      - name: go build
+        run: go build ./...
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          build-args: VERSION=ci-${{ github.sha }}
+
+  deb:
+    name: deb build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build binary and package
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o dist/mina-provision .
+          packaging/build-deb.sh dist/mina-provision 0.0.0-ci "$(dpkg --print-architecture)" dist
+      - name: Package installs and runs
+        run: |
+          sudo dpkg -i dist/*.deb
+          mina-provision --help
+
+  live:
+    name: live artifact check
+    # The default tests never touch the network. This job does, so it runs on a
+    # schedule and on demand rather than on every pull request: a published
+    # artifact moving is not a reason to block a code change, but it is a
+    # reason to find out.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build -o mina-provision .
+      - name: Fetch the mainnet config from the live repository
+        run: |
+          ./mina-provision config --network mainnet --channel o1test --out ./out -v
+          test -n "$(ls ./out/config_*.json)"

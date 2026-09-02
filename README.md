@@ -113,6 +113,10 @@ The built-in defaults are written in the same schema an operator writes, are
 embedded in the binary, and are read by the same parser. A custom provider can
 therefore express everything the defaults express.
 
+[`docs/providers.md`](docs/providers.md) is the full guide: worked examples per
+backend, what merging does, and how to add a provider to the built-in
+defaults.
+
 ### Where the configuration is read from
 
 In order; the first file found is used.

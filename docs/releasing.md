@@ -123,10 +123,14 @@ deb-s3 list --bucket stable.apt.packages.minaprotocol.com --s3-region us-west-2 
 On a target host:
 
 ```bash
-curl -fsSL https://stable.apt.packages.minaprotocol.com/key.asc \
-  | sudo gpg --dearmor -o /usr/share/keyrings/mina.gpg
-echo "deb [signed-by=/usr/share/keyrings/mina.gpg] https://stable.apt.packages.minaprotocol.com $(lsb_release -cs) stable" \
+sudo wget -q https://stable.apt.packages.minaprotocol.com/repo-signing-key.gpg \
+  -O /etc/apt/trusted.gpg.d/minaprotocol.gpg
+echo "deb https://stable.apt.packages.minaprotocol.com $(lsb_release -cs) stable" \
   | sudo tee /etc/apt/sources.list.d/mina.list
 sudo apt-get update
 apt-cache policy mina-provision
 ```
+
+The signing key is the one that signs every Mina repository, key id
+`386E9DAC378726A48ED5CE56ADB30D9ACE02F414`. It is published at
+`/repo-signing-key.gpg` on each repository host; `key.asc` does not exist.

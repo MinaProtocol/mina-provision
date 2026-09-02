@@ -14,9 +14,9 @@ mina-provision config  --network mainnet --out /var/lib/coda       # the config 
 
 ```bash
 # Debian and Ubuntu, from the signed apt repository
-curl -fsSL https://stable.apt.packages.minaprotocol.com/key.asc \
-  | sudo gpg --dearmor -o /usr/share/keyrings/mina.gpg
-echo "deb [signed-by=/usr/share/keyrings/mina.gpg] https://stable.apt.packages.minaprotocol.com $(lsb_release -cs) stable" \
+sudo wget -q https://stable.apt.packages.minaprotocol.com/repo-signing-key.gpg \
+  -O /etc/apt/trusted.gpg.d/minaprotocol.gpg
+echo "deb https://stable.apt.packages.minaprotocol.com $(lsb_release -cs) stable" \
   | sudo tee /etc/apt/sources.list.d/mina.list
 sudo apt-get update && sudo apt-get install mina-provision
 

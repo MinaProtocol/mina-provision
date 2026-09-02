@@ -44,7 +44,14 @@ CONTROL
 
 # -Zgzip keeps the package installable on older distributions, which is the
 # same reason the mina repository forces it.
-dpkg-deb -Zgzip --build "$BUILDDIR" \
+#
+# --root-owner-group records root:root for every file. Without it dpkg-deb
+# records the ownership of whoever ran the build, and dpkg applies that on
+# install: a package built by a CI runner would put a binary in /usr/bin owned
+# by the runner's numeric uid. On a host where that uid belongs to an
+# unprivileged user, that user could replace the binary that others run under
+# sudo.
+dpkg-deb --root-owner-group -Zgzip --build "$BUILDDIR" \
   "$OUTDIR/mina-provision_${VERSION}_${ARCH}.deb"
 
 echo "$OUTDIR/mina-provision_${VERSION}_${ARCH}.deb"

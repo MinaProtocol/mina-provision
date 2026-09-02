@@ -70,9 +70,24 @@ jobs:
         run: |
           CGO_ENABLED=0 go build -trimpath -o dist/mina-provision .
           packaging/build-deb.sh dist/mina-provision 0.0.0-ci "$(dpkg --print-architecture)" dist
+      - name: Package is owned by root
+        # dpkg applies the ownership recorded in the archive. Built without
+        # --root-owner-group it records the builder's uid, which on a target
+        # host is an unprivileged user who could then replace the binary.
+        run: |
+          set -euo pipefail
+          listing="$(dpkg-deb -c dist/*.deb)"
+          echo "$listing"
+          if echo "$listing" | grep -vq "root/root"; then
+            echo "the package records ownership other than root/root" >&2
+            echo "$listing" | grep -v "root/root" >&2
+            exit 1
+          fi
+
       - name: Package installs and runs
         run: |
           sudo dpkg -i dist/*.deb
+          test "$(stat -c %U:%G /usr/bin/mina-provision)" = "root:root"
           mina-provision --help
 
   live:

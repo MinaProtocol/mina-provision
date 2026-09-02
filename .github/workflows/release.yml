@@ -1,11 +1,8 @@
 name: Release
 
-# Fires on a vX.Y.Z tag. Builds a static binary per architecture, packages
-# each as a .deb, and attaches everything to a GitHub Release.
-#
-# Publishing to the APT repositories is deliberately out of scope here: it
-# needs S3 credentials and a signing key as repository secrets, and warrants
-# its own change. Until then the .deb is installed from the Release asset.
+# Fires on a vX.Y.Z tag. Builds a static binary per architecture, packages each
+# as a .deb, attaches everything to a GitHub Release, and publishes the
+# packages to the apt repository.
 
 on:
   push:
@@ -20,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -46,9 +45,95 @@ jobs:
           done
           ls -l dist
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist/*.deb
+          retention-days: 7
+
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
             dist/mina-provision-linux-*
             dist/*.deb
+
+  publish-apt:
+    name: publish to ${{ matrix.codename }}
+    needs: release
+    # Inert until the repository variable PUBLISH_APT is set to "true" and the
+    # AWS credentials are present as secrets. Without the gate a tag push would
+    # fail at the upload step rather than simply not publishing.
+    if: vars.PUBLISH_APT == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      # One codename at a time. deb-s3 rewrites the shared index files of the
+      # bucket, so two jobs uploading at once can lose each other'"'"'s entries.
+      max-parallel: 1
+      matrix:
+        codename: [ bullseye, bookworm, focal, jammy, noble ]
+    env:
+      BUCKET: packages.o1test.net
+      S3_REGION: us-west-2
+      COMPONENT: stable
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.2"
+
+      - name: Install deb-s3
+        # The MinaProtocol fork is used, not the upstream gem: the release
+        # tooling in this organisation is built against it.
+        run: |
+          git clone --depth 1 https://github.com/MinaProtocol/deb-s3.git /tmp/deb-s3
+          cd /tmp/deb-s3
+          gem build deb-s3.gemspec
+          sudo gem install ./deb-s3-*.gem
+
+      - name: Upload packages
+        env:
+          CODENAME: ${{ matrix.codename }}
+        run: |
+          set -euo pipefail
+          # One package per call. deb-s3 handles a single upload predictably;
+          # batching several into one call does not report per-package outcomes.
+          for deb in dist/*.deb; do
+            echo "--- uploading $deb to $CODENAME/$COMPONENT"
+            deb-s3 upload \
+              --bucket "$BUCKET" \
+              --s3-region "$S3_REGION" \
+              --codename "$CODENAME" \
+              --component "$COMPONENT" \
+              --preserve-versions \
+              --lock \
+              "$deb"
+          done
+
+      - name: Verify the packages are listed
+        env:
+          CODENAME: ${{ matrix.codename }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          # deb-s3 exit status is not a reliable verdict on its own, so the
+          # repository is read back and the version has to appear in it.
+          listing="$(deb-s3 list \
+            --bucket "$BUCKET" \
+            --s3-region "$S3_REGION" \
+            --codename "$CODENAME" \
+            --component "$COMPONENT")"
+          echo "$listing" | grep -E "^mina-provision" || true
+          if ! echo "$listing" | grep -q "$VERSION"; then
+            echo "mina-provision $VERSION is not listed in $CODENAME/$COMPONENT after upload" >&2
+            exit 1
+          fi
+          echo "mina-provision $VERSION is published to $CODENAME/$COMPONENT"

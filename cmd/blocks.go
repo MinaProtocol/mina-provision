@@ -12,8 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/MinaProtocol/mina-provision/internal/download"
-	"github.com/MinaProtocol/mina-provision/internal/networks"
+	"github.com/MinaProtocol/mina-provision/internal/provider"
+	"github.com/MinaProtocol/mina-provision/internal/source"
 )
 
 var (
@@ -21,45 +21,42 @@ var (
 	blocksOut   string
 )
 
-// Hardcoded safety cap: refuse to fetch more than this many blocks in one
-// invocation. Operators who genuinely need more should run the tool in
-// multiple chunks. The cap exists to prevent a typo from triggering tens of
-// thousands of HTTP requests against the public bucket.
+// maxBlocksPerInvocation bounds one run. Operators who genuinely need more
+// should run the tool in chunks; the cap keeps a typo from turning into tens of
+// thousands of requests against a publisher.
 const maxBlocksPerInvocation = 50_000
 
-// When --range END is omitted, the tool walks heights upward until it sees
-// this many consecutive missing heights and assumes it's past chain tip.
-// Mina has empty slots so the value has to be comfortably higher than the
-// expected longest gap; 1000 slots ≈ 3 hours of slots, well beyond any
-// realistic skip.
+// openEndedMissThreshold is how many consecutive heights with no block are
+// taken to mean the chain tip has been passed. Mina has empty slots, so the
+// value has to sit well above any realistic run of them: 1000 slots is about
+// three hours.
 const openEndedMissThreshold = 1000
 
 var blocksCmd = &cobra.Command{
 	Use:   "blocks",
 	Short: "Fetch precomputed blocks onto local disk",
-	Long: `Downloads precomputed block JSON files from the Mina Foundation's
-public GCS bucket (mina_network_block_data) for a height range, used to
-backfill missing blocks in an archive node's database.
+	Long: `Fetches precomputed block files for a height range from the configured
+provider.
 
-Precomputed block filenames embed the network name, block height, and
-state hash, e.g. mainnet-50000-3NLfKanQ53X2MRKx5ZRvb9nVCEB9eJpcnssGCTpT3J1cojhB5M19.json.
+Block names embed the network, the height and the state hash, so a height on
+its own only narrows the name to a prefix. The provider is asked to list that
+prefix, which a bucket does directly and a plain web server can only do with
+an index.
 
 Range formats:
   --range 50000                single block at height 50000
   --range 50000-51000          explicit range, inclusive on both ends
-  --range 50000-               open-ended, from 50000 to chain tip; stops
-                               after enough consecutive missing heights to
-                               conclude the tip is reached
+  --range 50000-               open-ended, up to the chain tip
 
-This command only places files on disk. Applying them to an archive
-database is mina-archive's work, and reading them is the indexer's; both
-take a local directory of block files as their input.`,
+This command only places files on disk. Applying them to an archive database
+is mina-archive's work, and reading them is an indexer's; both take a local
+directory of block files as input.`,
 	RunE: runBlocks,
 }
 
 func init() {
-	blocksCmd.Flags().StringVar(&blocksRange, "range", "", "Height range, e.g. 50000-51000 (inclusive). Single height (50000) or open-ended (50000-) also accepted. Required.")
-	blocksCmd.Flags().StringVar(&blocksOut, "out", "./blocks", "Directory to write the downloaded block files.")
+	blocksCmd.Flags().StringVar(&blocksRange, "range", "", "Height range, e.g. 50000-51000 (inclusive), 50000, or 50000- for open-ended. Required.")
+	blocksCmd.Flags().StringVar(&blocksOut, "out", "./blocks", "Directory to write the block files into.")
 }
 
 func runBlocks(_ *cobra.Command, _ []string) error {
@@ -75,62 +72,71 @@ func runBlocks(_ *cobra.Command, _ []string) error {
 			"Split into smaller ranges and re-run", start, end, end-start+1, maxBlocksPerInvocation)
 	}
 
-	net, err := networks.Lookup(network)
+	art, err := resolveArtifact(provider.KindPrecomputedBlocks)
 	if err != nil {
 		return err
 	}
-
+	src, err := source.New(art)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(blocksOut, 0o755); err != nil {
 		return err
 	}
 
 	ctx := context.Background()
-
-	// Per-height prefix lookups. The bucket holds 500k+ mainnet blocks; listing
-	// the whole `mainnet-` prefix takes minutes. By prefixing each query with
-	// the specific block height we get one HTTP roundtrip per height (each
-	// returns 0-N keys, usually 1 canonical block).
-	wanted, err := discoverBlocks(ctx, net, start, end, openEnded)
+	wanted, err := discoverBlocks(ctx, src, art, start, end, openEnded)
 	if err != nil {
 		return err
 	}
 	slog.Info("found blocks in range", "count", len(wanted), "range_start", start, "open_ended", openEnded)
 
-	if _, err := downloadBlocks(ctx, net, wanted, blocksOut); err != nil {
+	if _, err := downloadBlocks(ctx, src, wanted, blocksOut); err != nil {
 		return err
 	}
 
-	fmt.Fprintf(os.Stdout, "Downloaded %d precomputed blocks to %s\n", len(wanted), blocksOut)
+	fmt.Fprintf(os.Stdout, "Fetched %d precomputed blocks from %s into %s\n",
+		len(wanted), src.Describe(), blocksOut)
 	return nil
 }
 
-// downloadBlocks fetches each block key from the network's precomputed bucket
-// into outDir and returns the local file paths in the same order.
-func downloadBlocks(ctx context.Context, net networks.Network, keys []string, outDir string) ([]string, error) {
-	paths := make([]string, 0, len(keys))
-	for _, key := range keys {
-		dst := filepath.Join(outDir, key)
-		if err := download.GCSObject(ctx, net.PrecomputedBucket, key, dst); err != nil {
-			return nil, fmt.Errorf("download %s: %w", key, err)
+// downloadBlocks fetches each named block into outDir and returns the local
+// paths in the same order.
+func downloadBlocks(ctx context.Context, src source.Source, names []string, outDir string) ([]string, error) {
+	paths := make([]string, 0, len(names))
+	for _, name := range names {
+		dst := filepath.Join(outDir, filepath.Base(name))
+		if err := src.Get(ctx, name, dst); err != nil {
+			return nil, fmt.Errorf("fetch %s: %w", name, err)
 		}
 		paths = append(paths, dst)
 	}
 	return paths, nil
 }
 
-func discoverBlocks(ctx context.Context, net networks.Network, start, end int, openEnded bool) ([]string, error) {
+// discoverBlocks walks heights and asks the provider which block names exist
+// at each. One query per height keeps the work proportional to the range asked
+// for: listing a whole network prefix would return hundreds of thousands of
+// names.
+func discoverBlocks(ctx context.Context, src source.Source, art *provider.Artifact, start, end int, openEnded bool) ([]string, error) {
 	var wanted []string
 	consecutiveMisses := 0
 	for h := start; openEnded || h <= end; h++ {
-		prefix := fmt.Sprintf("%s%d-", net.PrecomputedFilenamePrefix, h)
-		keys, err := download.ListGCSObjects(ctx, net.PrecomputedBucket, prefix, 0)
+		prefix, err := provider.Prefix(art.Name, map[string]string{
+			provider.FieldHeight: strconv.Itoa(h),
+		})
+		if err != nil {
+			return nil, err
+		}
+		names, err := src.List(ctx, prefix)
 		if err != nil {
 			return nil, fmt.Errorf("list height %d: %w", h, err)
 		}
+
 		hit := false
-		for _, k := range keys {
-			if strings.HasSuffix(k, ".json") {
-				wanted = append(wanted, k)
+		for _, n := range names {
+			if strings.HasSuffix(n, ".json") {
+				wanted = append(wanted, n)
 				hit = true
 			}
 		}

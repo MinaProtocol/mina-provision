@@ -7,6 +7,7 @@ require (
 	github.com/schollz/progressbar/v3 v3.14.6
 	github.com/spf13/cobra v1.8.1
 	google.golang.org/api v0.193.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

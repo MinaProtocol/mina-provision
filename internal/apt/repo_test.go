@@ -64,16 +64,3 @@ func TestParsePackagesIgnoresContinuationLines(t *testing.T) {
 		}
 	}
 }
-
-func TestLookupChannelRejectsUnknown(t *testing.T) {
-	if _, err := LookupChannel("does-not-exist"); err == nil {
-		t.Fatal("expected an error for an unknown channel")
-	}
-	c, err := LookupChannel("STABLE")
-	if err != nil {
-		t.Fatalf("channel lookup should be case-insensitive: %v", err)
-	}
-	if c.DefaultComponent != "stable" {
-		t.Errorf("unexpected default component %q", c.DefaultComponent)
-	}
-}

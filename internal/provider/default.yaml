@@ -1,0 +1,107 @@
+# Built-in provider definitions.
+#
+# This file is embedded in the binary and is the starting point for every run.
+# It is not a special case in the code: it is parsed by exactly the same reader
+# as a file an operator writes, so a custom provider can express anything the
+# defaults express, and the defaults cannot quietly grow abilities a custom
+# provider lacks.
+#
+# A user configuration is merged OVER this one, per provider, per network, per
+# artifact. Adding a mirror therefore does not mean copying the entries below,
+# and those entries keep receiving updates.
+
+version: 1
+
+# The Mina Foundation is the default publisher of these artifacts. It is not
+# the only possible one. Point --provider at your own entry, or add one in a
+# local file, to read from a mirror or from an internal store.
+default_provider: o1labs
+
+providers:
+  o1labs:
+    description: Mina Foundation public artifacts
+
+    networks:
+      mainnet:
+        archive_dump:
+          backend: gcs
+          bucket: mina-archive-dumps
+          name: "mainnet-archive-dump-{date}_{hour}.sql.tar.gz"
+          # No independent digest is published beside these objects. The
+          # transfer itself is checked by the storage client and by the
+          # expected object size. A mirror that publishes "<file>.sha256"
+          # should say `checksum: sidecar` instead.
+          checksum: none
+        precomputed_blocks:
+          backend: gcs
+          bucket: mina_network_block_data
+          name: "mainnet-{height}-{state_hash}.json"
+          checksum: none
+        config:
+          backend: apt
+          repository: https://packages.o1test.net
+          codename: noble
+          component: stable
+          package: mina-mainnet-config
+          # The repository index publishes a SHA256 for every package, and it
+          # is always checked.
+          checksum: index
+
+      devnet:
+        archive_dump:
+          backend: gcs
+          bucket: mina-archive-dumps
+          name: "devnet-archive-dump-{date}_{hour}.sql.tar.gz"
+          checksum: none
+        precomputed_blocks:
+          backend: gcs
+          bucket: mina_network_block_data
+          name: "devnet-{height}-{state_hash}.json"
+          checksum: none
+        config:
+          backend: apt
+          repository: https://packages.o1test.net
+          codename: noble
+          component: stable
+          package: mina-devnet-config
+          checksum: index
+
+      # mesa is the frozen "hetzner-pre-mesa-1" reference network. Its blocks
+      # use the post-hardfork block format, which is why it exists here.
+      mesa:
+        archive_dump:
+          backend: gcs
+          bucket: mina-archive-dumps
+          name: "hetzner-pre-mesa-1-archive-dump-{date}_{hour}.sql.tar.gz"
+          checksum: none
+        precomputed_blocks:
+          backend: gcs
+          bucket: mesa-hf-precomputed-blocks
+          name: "hetzner-pre-mesa-1-{height}-{state_hash}.json"
+          checksum: none
+
+  # The mina source tree, for an operator who wants the configuration a
+  # specific commit carries. It serves the file under its source-tree name, so
+  # the daemon will not auto-load the result; only the package carries the
+  # config_<hash>.json name.
+  github:
+    description: mina source tree at a git ref (source-tree names, not daemon names)
+    networks:
+      mainnet:
+        config:
+          backend: http
+          base_url: https://raw.githubusercontent.com/MinaProtocol/mina
+          name: "{ref}/genesis_ledgers/mainnet.json"
+          checksum: none
+      devnet:
+        config:
+          backend: http
+          base_url: https://raw.githubusercontent.com/MinaProtocol/mina
+          name: "{ref}/genesis_ledgers/devnet.json"
+          checksum: none
+      mesa:
+        config:
+          backend: http
+          base_url: https://raw.githubusercontent.com/MinaProtocol/mina
+          name: "{ref}/genesis_ledgers/mesa.json"
+          checksum: none

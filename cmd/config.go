@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,22 +12,22 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/MinaProtocol/mina-provision/internal/apt"
-	"github.com/MinaProtocol/mina-provision/internal/networks"
+	"github.com/MinaProtocol/mina-provision/internal/provider"
+	"github.com/MinaProtocol/mina-provision/internal/source"
 )
 
 var (
 	configOut       string
-	configChannel   string
 	configComponent string
 	configCodename  string
 	configVersion   string
-	configSource    string
+	configRepo      string
+	configPackage   string
 	configRef       string
 )
 
-// configDir is where the daemon looks for its runtime configuration, and
-// therefore the directory inside the package that holds the files worth
-// extracting.
+// configDir is where the daemon looks for its runtime configuration, and so
+// the directory inside a package whose contents are worth keeping.
 const configDir = "var/lib/coda"
 
 var configCmd = &cobra.Command{
@@ -37,35 +36,32 @@ var configCmd = &cobra.Command{
 	Long: `Fetches the runtime configuration for a network and writes it into a
 local directory.
 
-The default source is the mina-<network>-config Debian package, and that is
-deliberate. The daemon auto-loads /var/lib/coda/config_<hash>.json, where the
-hash is derived from the commit at build time and is not the same length as
-the hash in the package version. The package is the only published artifact
-that carries both the right content and the right file name, and the
-repository index publishes a SHA256 for it, which this command always checks.
+The default provider serves this as a Debian package, and that is deliberate.
+The daemon auto-loads /var/lib/coda/config_<hash>.json, where the hash is
+derived from the commit at build time and is not the hash in the package
+version. The package is the only published artifact carrying both the right
+content and the right file name, and the repository index publishes a SHA256
+for it, which is always checked.
 
-The same JSON exists in the mina source tree as genesis_ledgers/<network>.json.
-It can be fetched with --source github --ref <tag>, but it arrives under the
-source-tree name only, so the daemon will not auto-load it.`,
+The same JSON exists in the mina source tree. "--provider github --ref <tag>"
+fetches it from there, but it arrives under the source-tree name, so the
+daemon will not auto-load it.`,
 	RunE: runConfig,
 }
 
 func init() {
 	configCmd.Flags().StringVar(&configOut, "out", ".", "Directory to write the configuration files into.")
-	configCmd.Flags().StringVar(&configChannel, "channel", "o1test",
-		"Debian channel to read: "+strings.Join(apt.ChannelNames(), ", ")+".")
-	configCmd.Flags().StringVar(&configComponent, "component", "",
-		"Component within the channel. Defaults to the channel's own default.")
-	configCmd.Flags().StringVar(&configCodename, "codename", "noble",
-		"Distribution codename: bullseye, focal, buster, jammy, noble, bookworm.")
+	configCmd.Flags().StringVar(&configRepo, "repository", "", "Override the provider's Debian repository URL.")
+	configCmd.Flags().StringVar(&configComponent, "component", "", "Override the provider's repository component.")
+	configCmd.Flags().StringVar(&configCodename, "codename", "", "Override the provider's distribution codename.")
+	configCmd.Flags().StringVar(&configPackage, "package", "", "Override the provider's package name.")
 	configCmd.Flags().StringVar(&configVersion, "version", "",
-		"Exact package version. Default: the highest version present, ordered by Debian rules.")
-	configCmd.Flags().StringVar(&configSource, "source", "apt", "Where to fetch from: apt or github.")
-	configCmd.Flags().StringVar(&configRef, "ref", "compatible", "Git ref, with --source github.")
+		"Exact package version. Default: the highest, ordered by Debian rules.")
+	configCmd.Flags().StringVar(&configRef, "ref", "compatible", "Git ref, for a provider that serves a source tree.")
 }
 
 func runConfig(_ *cobra.Command, _ []string) error {
-	net, err := networks.Lookup(network)
+	art, err := resolveArtifact(provider.KindConfig)
 	if err != nil {
 		return err
 	}
@@ -74,30 +70,23 @@ func runConfig(_ *cobra.Command, _ []string) error {
 	}
 	ctx := context.Background()
 
-	switch configSource {
-	case "apt":
-		return configFromApt(ctx, net)
-	case "github":
-		return configFromGitHub(ctx, net)
-	default:
-		return fmt.Errorf("--source must be apt or github, got %q", configSource)
+	if art.Backend == provider.BackendAPT {
+		return configFromPackage(ctx, art)
 	}
+	return configFromFile(ctx, art)
 }
 
-func configFromApt(ctx context.Context, net networks.Network) error {
-	ch, err := apt.LookupChannel(configChannel)
-	if err != nil {
-		return err
-	}
-	pkgName := fmt.Sprintf("mina-%s-config", net.Name)
-
-	pkg, err := apt.Resolve(ctx, apt.Query{
-		Channel:   ch,
-		Component: configComponent,
-		Codename:  configCodename,
-		Package:   pkgName,
+// configFromPackage fetches the configuration package, verifies it against the
+// checksum the repository index publishes, and keeps the JSON files it carries.
+func configFromPackage(ctx context.Context, art *provider.Artifact) error {
+	q := apt.Query{
+		BaseURL:   firstNonEmpty(configRepo, art.Repository),
+		Component: firstNonEmpty(configComponent, art.Component),
+		Codename:  firstNonEmpty(configCodename, art.Codename),
+		Package:   firstNonEmpty(configPackage, art.Package),
 		Version:   configVersion,
-	})
+	}
+	pkg, err := apt.Resolve(ctx, q)
 	if err != nil {
 		return err
 	}
@@ -109,7 +98,7 @@ func configFromApt(ctx context.Context, net networks.Network) error {
 	}
 	defer os.RemoveAll(tmp)
 
-	debPath, err := apt.Download(ctx, ch, pkg, tmp)
+	debPath, err := apt.Download(ctx, q.BaseURL, pkg, tmp)
 	if err != nil {
 		return err
 	}
@@ -136,10 +125,35 @@ func configFromApt(ctx context.Context, net networks.Network) error {
 	return nil
 }
 
-// copyConfigFiles moves the JSON files the package carries under
-// /var/lib/coda into outDir, keeping their published names. Anything else in
-// the package (a systemd unit, for instance) is not configuration and is left
-// behind.
+// configFromFile fetches the configuration as a plain file, for a provider that
+// serves it directly rather than as a package.
+func configFromFile(ctx context.Context, art *provider.Artifact) error {
+	src, err := source.New(art)
+	if err != nil {
+		return err
+	}
+	name, err := provider.Render(art.Name, map[string]string{provider.FieldRef: configRef})
+	if err != nil {
+		return err
+	}
+	dst := filepath.Join(configOut, filepath.Base(name))
+	if err := src.Get(ctx, name, dst); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stdout, "Wrote %s from %s.\n", dst, src.Describe())
+	if art.Checksum == provider.ChecksumNone {
+		fmt.Fprintf(os.Stdout, "This provider publishes no digest for the file, so only the "+
+			"transfer was checked. The Debian package the default provider serves is verified "+
+			"against a published SHA256, and carries the config_<hash>.json name the daemon "+
+			"auto-loads.\n")
+	}
+	return nil
+}
+
+// copyConfigFiles keeps the JSON files a package carries under /var/lib/coda,
+// under their published names. Anything else in the package is not
+// configuration and is left behind.
 func copyConfigFiles(files []string, unpackedRoot, outDir string) ([]string, error) {
 	var written []string
 	for _, f := range files {
@@ -147,7 +161,7 @@ func copyConfigFiles(files []string, unpackedRoot, outDir string) ([]string, err
 		if err != nil {
 			continue
 		}
-		rel = filepath.ToSlash(strings.TrimPrefix(filepath.ToSlash(rel), "./"))
+		rel = strings.TrimPrefix(filepath.ToSlash(rel), "./")
 		if !strings.HasPrefix(rel, configDir+"/") || !strings.HasSuffix(rel, ".json") {
 			continue
 		}
@@ -177,40 +191,11 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-// configFromGitHub fetches genesis_ledgers/<network>.json from the mina source
-// tree at a ref. This is the escape hatch for an operator who wants the file a
-// specific commit carries; it is not the default, because the file arrives
-// under the source-tree name and the daemon will not auto-load it.
-func configFromGitHub(ctx context.Context, net networks.Network) error {
-	url := fmt.Sprintf("https://raw.githubusercontent.com/MinaProtocol/mina/%s/genesis_ledgers/%s.json",
-		configRef, net.Name)
-	slog.Info("fetching config from github", "url", url)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("get %s: %s", url, resp.Status)
-	}
-
-	dst := filepath.Join(configOut, net.Name+".json")
-	f, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		return err
-	}
-
-	fmt.Fprintf(os.Stdout, "Wrote %s from ref %s.\n", dst, configRef)
-	fmt.Fprintf(os.Stdout, "Note: this is the source-tree name. The daemon auto-loads "+
-		"config_<hash>.json, which only the Debian package carries.\n")
-	return nil
+	return ""
 }

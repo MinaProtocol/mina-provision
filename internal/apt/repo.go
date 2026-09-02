@@ -9,7 +9,9 @@
 // hand. The package carries both the right content and the right name.
 //
 // Only the read paths are implemented: resolve a package in an index, fetch
-// it, and verify it against the checksum the index publishes.
+// it, and verify it against the checksum the index publishes. The repository
+// URL is supplied by the caller from the provider configuration, so no
+// endpoint is written down here.
 package apt
 
 import (
@@ -28,65 +30,6 @@ import (
 	"strings"
 )
 
-// Channel is one of the Mina Debian repositories. The signed repositories are
-// separate hosts rather than components of one repository, so the channel
-// selects the host and the component selects the section within it.
-type Channel struct {
-	Name             string
-	BaseURL          string
-	DefaultComponent string
-	Signed           bool
-}
-
-var channels = map[string]Channel{
-	"stable": {
-		Name:             "stable",
-		BaseURL:          "https://stable.apt.packages.minaprotocol.com",
-		DefaultComponent: "stable",
-		Signed:           true,
-	},
-	"unstable": {
-		Name:             "unstable",
-		BaseURL:          "https://unstable.apt.packages.minaprotocol.com",
-		DefaultComponent: "beta",
-		Signed:           true,
-	},
-	"nightly": {
-		Name:             "nightly",
-		BaseURL:          "https://nightly.apt.packages.minaprotocol.com",
-		DefaultComponent: "compatible",
-		Signed:           true,
-	},
-	// Legacy unsigned multi-purpose repository. Kept because packages still
-	// land here that are not yet promoted to a signed channel.
-	"o1test": {
-		Name:             "o1test",
-		BaseURL:          "https://packages.o1test.net",
-		DefaultComponent: "stable",
-		Signed:           false,
-	},
-}
-
-// ChannelNames lists the known channels, for flag help and error messages.
-func ChannelNames() []string {
-	names := make([]string, 0, len(channels))
-	for n := range channels {
-		names = append(names, n)
-	}
-	sortStrings(names)
-	return names
-}
-
-// LookupChannel resolves a channel by name.
-func LookupChannel(name string) (Channel, error) {
-	c, ok := channels[strings.ToLower(strings.TrimSpace(name))]
-	if !ok {
-		return Channel{}, fmt.Errorf("unknown channel %q; known channels: %s",
-			name, strings.Join(ChannelNames(), ", "))
-	}
-	return c, nil
-}
-
 // Package is one stanza of a Packages index, reduced to the fields needed to
 // fetch and verify the file.
 type Package struct {
@@ -98,9 +41,10 @@ type Package struct {
 	SHA256       string
 }
 
-// Query names one package in one repository.
+// Query names one package in one repository. The repository URL comes from the
+// provider configuration, so this package holds no endpoint of its own.
 type Query struct {
-	Channel   Channel
+	BaseURL   string
 	Component string
 	Codename  string
 	Package   string
@@ -117,16 +61,22 @@ var architectures = []string{"all", "amd64"}
 
 // Resolve finds the package a Query names and returns its index entry.
 func Resolve(ctx context.Context, q Query) (Package, error) {
+	if q.BaseURL == "" {
+		return Package{}, fmt.Errorf("no repository URL given")
+	}
 	component := q.Component
 	if component == "" {
-		component = q.Channel.DefaultComponent
+		return Package{}, fmt.Errorf("no repository component given for %s", q.BaseURL)
+	}
+	if q.Codename == "" {
+		return Package{}, fmt.Errorf("no distribution codename given for %s", q.BaseURL)
 	}
 
 	var candidates []Package
 	var tried []string
 	for _, arch := range architectures {
 		base := fmt.Sprintf("%s/dists/%s/%s/binary-%s/Packages",
-			q.Channel.BaseURL, q.Codename, component, arch)
+			strings.TrimSuffix(q.BaseURL, "/"), q.Codename, component, arch)
 		tried = append(tried, base)
 
 		body, err := fetchIndex(ctx, base)
@@ -152,8 +102,8 @@ func Resolve(ctx context.Context, q Query) (Package, error) {
 				return p, nil
 			}
 		}
-		return Package{}, fmt.Errorf("%s version %q not found in %s/%s/%s (found: %s)",
-			q.Package, q.Version, q.Channel.Name, q.Codename, component,
+		return Package{}, fmt.Errorf("%s version %q not found in %s %s/%s (found: %s)",
+			q.Package, q.Version, q.BaseURL, q.Codename, component,
 			strings.Join(versionsOf(candidates), ", "))
 	}
 
@@ -172,12 +122,12 @@ func Resolve(ctx context.Context, q Query) (Package, error) {
 // is not verified is only transport security, and the point of preferring the
 // package over an ad-hoc download is that the publisher states what the bytes
 // should be.
-func Download(ctx context.Context, ch Channel, p Package, dir string) (string, error) {
+func Download(ctx context.Context, baseURL string, p Package, dir string) (string, error) {
 	if p.SHA256 == "" {
 		return "", fmt.Errorf("%s %s: index publishes no SHA256; refusing to use an unverifiable package",
 			p.Name, p.Version)
 	}
-	url := ch.BaseURL + "/" + strings.TrimPrefix(p.Filename, "/")
+	url := strings.TrimSuffix(baseURL, "/") + "/" + strings.TrimPrefix(p.Filename, "/")
 	slog.Info("downloading package", "url", url, "size", p.Size)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -312,9 +262,9 @@ func parsePackages(r io.Reader, name string) ([]Package, error) {
 // indexes were read, and which components the repository actually publishes
 // for that codename. Components differ per channel and are not guessable.
 func notFoundError(ctx context.Context, q Query, component string, tried []string) error {
-	msg := fmt.Sprintf("package %q not found in channel %s, codename %s, component %s",
-		q.Package, q.Channel.Name, q.Codename, component)
-	if comps, err := Components(ctx, q.Channel, q.Codename); err == nil && len(comps) > 0 {
+	msg := fmt.Sprintf("package %q not found in %s, codename %s, component %s",
+		q.Package, q.BaseURL, q.Codename, component)
+	if comps, err := Components(ctx, q.BaseURL, q.Codename); err == nil && len(comps) > 0 {
 		msg += fmt.Sprintf("\ncomponents published for %s: %s", q.Codename, strings.Join(comps, ", "))
 	}
 	msg += "\nindexes read: " + strings.Join(tried, ", ")
@@ -323,8 +273,8 @@ func notFoundError(ctx context.Context, q Query, component string, tried []strin
 
 // Components lists the components a repository publishes for a codename, read
 // from its Release file.
-func Components(ctx context.Context, ch Channel, codename string) ([]string, error) {
-	url := fmt.Sprintf("%s/dists/%s/Release", ch.BaseURL, codename)
+func Components(ctx context.Context, baseURL, codename string) ([]string, error) {
+	url := fmt.Sprintf("%s/dists/%s/Release", strings.TrimSuffix(baseURL, "/"), codename)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -352,12 +302,4 @@ func versionsOf(pkgs []Package) []string {
 		v = append(v, p.Version)
 	}
 	return v
-}
-
-func sortStrings(s []string) {
-	for i := 1; i < len(s); i++ {
-		for j := i; j > 0 && s[j] < s[j-1]; j-- {
-			s[j], s[j-1] = s[j-1], s[j]
-		}
-	}
 }

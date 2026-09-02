@@ -7,11 +7,15 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/MinaProtocol/mina-provision/internal/provider"
 )
 
 var (
-	verbose bool
-	network string
+	verbose        bool
+	network        string
+	providerName   string
+	providerConfig string
 )
 
 var rootCmd = &cobra.Command{
@@ -55,7 +59,9 @@ into an archive database -- that is mina-archive's own work.`,
 // subcommand and never changes within one host, so typing it every time is
 // pure noise.
 var envForFlag = map[string]string{
-	"network": "MINA_NETWORK",
+	"network":         "MINA_NETWORK",
+	"provider":        "MINA_PROVIDER",
+	"provider-config": "MINA_PROVISION_CONFIG",
 }
 
 // applyEnvDefaults fills any flag listed in envForFlag from its environment
@@ -82,7 +88,11 @@ func applyEnvDefaults(cmd *cobra.Command) error {
 func init() {
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable debug logging")
 	rootCmd.PersistentFlags().StringVar(&network, "network", "mainnet",
-		"Mina network: mainnet, devnet, mesa. May also be set with MINA_NETWORK.")
+		"Mina network the artifacts belong to. May also be set with MINA_NETWORK.")
+	rootCmd.PersistentFlags().StringVar(&providerName, "provider", "",
+		"Which publisher to read from. Default: the configured default_provider. May also be set with MINA_PROVIDER.")
+	rootCmd.PersistentFlags().StringVar(&providerConfig, "provider-config", "",
+		"Path to a provider configuration file. May also be set with MINA_PROVISION_CONFIG.")
 
 	rootCmd.AddCommand(archiveCmd)
 	rootCmd.AddCommand(blocksCmd)
@@ -94,6 +104,22 @@ func init() {
 // is to fetch artifacts that other software then trusts.
 func SetVersion(v string) {
 	rootCmd.Version = v
+}
+
+// resolveArtifact loads the provider configuration and returns the artifact of
+// the given kind for the selected provider and network. Every command starts
+// here, so a single file governs every endpoint the tool will contact.
+func resolveArtifact(kind provider.Kind) (*provider.Artifact, error) {
+	cfg, path, err := provider.Load(providerConfig)
+	if err != nil {
+		return nil, err
+	}
+	if path == "" {
+		slog.Debug("using built-in provider defaults")
+	} else {
+		slog.Info("provider configuration loaded", "path", path)
+	}
+	return cfg.Resolve(providerName, network, kind)
 }
 
 func Execute() error {

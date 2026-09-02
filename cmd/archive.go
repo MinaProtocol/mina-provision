@@ -11,10 +11,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/MinaProtocol/mina-provision/internal/download"
 	"github.com/MinaProtocol/mina-provision/internal/extract"
-	"github.com/MinaProtocol/mina-provision/internal/networks"
 	"github.com/MinaProtocol/mina-provision/internal/pg"
+	"github.com/MinaProtocol/mina-provision/internal/provider"
+	"github.com/MinaProtocol/mina-provision/internal/source"
 )
 
 var (
@@ -25,45 +25,45 @@ var (
 	archiveSkipPg  bool
 )
 
-// archiveCmd provisions an archive database from a published dump: it
-// downloads the dump, extracts it, applies the recommended PostgreSQL tuning
-// and loads the SQL.
-//
-// It replaces the multi-step curl + tar + psql sequence inlined in the Rosetta
-// docker-compose bootstrap_db service and repeated across the docs2
-// archive-node setup pages.
+// archiveCmd provisions an archive database from a published dump: it fetches
+// the dump, extracts it, applies the recommended PostgreSQL tuning and loads
+// the SQL.
 //
 // Closing the gap between the dump's tip and the chain tip is deliberately not
 // done here. A dump is hours old, so blocks are missing at the top, but writing
-// blocks into the archive schema is the archive writer's work, not this tool's.
-// Fetch them with `mina-provision blocks` and apply them with mina-archive.
+// blocks into the archive schema is the archive writer's work. Fetch them with
+// `mina-provision blocks` and apply them with mina-archive.
 var archiveCmd = &cobra.Command{
 	Use:   "archive",
 	Short: "Provision an archive database from a published dump",
-	Long: `Downloads the latest (or a date-pinned) archive dump from the Mina
-Foundation's public GCS bucket, extracts it, applies the recommended
-PostgreSQL tuning, and loads the SQL into the target database.
+	Long: `Fetches an archive dump from the configured provider, extracts it,
+applies the recommended PostgreSQL tuning, and loads the SQL into the target
+database.
 
-The dump is produced hourly and is therefore behind the chain tip when it is
-restored. Fetch the remaining blocks with "mina-provision blocks" and apply
-them with mina-archive.`,
-	RunE: runArchiveRestore,
+Dumps are produced hourly, so a restored database is behind the chain tip.
+Fetch the remaining blocks with "mina-provision blocks" and apply them with
+mina-archive.`,
+	RunE: runArchive,
 }
 
 func init() {
 	archiveCmd.Flags().StringVar(&archivePgURI, "pg-uri", "", "Postgres URI (postgres://user:pw@host:port/db). Required unless --skip-pg.")
 	archiveCmd.Flags().StringVar(&archiveDate, "date", "", "Dump date in YYYY-MM-DD form. Defaults to today (UTC).")
-	archiveCmd.Flags().StringVar(&archiveHour, "hour", "0000", "Dump hour in HHMM form (dumps are produced hourly). Default 0000 (midnight UTC).")
+	archiveCmd.Flags().StringVar(&archiveHour, "hour", "0000", "Dump hour in HHMM form (dumps are produced hourly).")
 	archiveCmd.Flags().StringVar(&archiveWorkDir, "work-dir", ".", "Where to download and extract intermediate files.")
-	archiveCmd.Flags().BoolVar(&archiveSkipPg, "skip-pg", false, "Download + extract only; skip the psql restore step.")
+	archiveCmd.Flags().BoolVar(&archiveSkipPg, "skip-pg", false, "Download and extract only; skip the psql restore step.")
 }
 
-func runArchiveRestore(_ *cobra.Command, _ []string) error {
+func runArchive(_ *cobra.Command, _ []string) error {
 	if !archiveSkipPg && archivePgURI == "" {
 		return fmt.Errorf("--pg-uri is required (or pass --skip-pg to download only)")
 	}
 
-	net, err := networks.Lookup(network)
+	art, err := resolveArtifact(provider.KindArchiveDump)
+	if err != nil {
+		return err
+	}
+	src, err := source.New(art)
 	if err != nil {
 		return err
 	}
@@ -72,24 +72,27 @@ func runArchiveRestore(_ *cobra.Command, _ []string) error {
 	if date == "" {
 		date = time.Now().UTC().Format("2006-01-02")
 	}
-	hour := archiveHour
-	if err := validateHour(hour); err != nil {
+	if err := validateHour(archiveHour); err != nil {
 		return err
 	}
 
-	tarballName := dumpTarballName(net.ArchiveDumpPrefix, date, hour)
-	tarballPath := filepath.Join(archiveWorkDir, tarballName)
+	name, err := provider.Render(art.Name, map[string]string{
+		provider.FieldDate: date,
+		provider.FieldHour: archiveHour,
+	})
+	if err != nil {
+		return err
+	}
+	dst := filepath.Join(archiveWorkDir, filepath.Base(name))
 
 	ctx := context.Background()
-
-	slog.Info("downloading archive dump",
-		"bucket", net.ArchiveDumpBucket, "object", tarballName, "dst", tarballPath)
-	if err := download.GCSObject(ctx, net.ArchiveDumpBucket, tarballName, tarballPath); err != nil {
-		return fmt.Errorf("download: %w", err)
+	slog.Info("fetching archive dump", "from", src.Describe(), "object", name, "dst", dst)
+	if err := src.Get(ctx, name, dst); err != nil {
+		return fmt.Errorf("fetch: %w", err)
 	}
 
-	slog.Info("extracting", "src", tarballPath, "dst", archiveWorkDir)
-	files, err := extract.TarGz(tarballPath, archiveWorkDir)
+	slog.Info("extracting", "src", dst, "dst", archiveWorkDir)
+	files, err := extract.TarGz(dst, archiveWorkDir)
 	if err != nil {
 		return fmt.Errorf("extract: %w", err)
 	}
@@ -102,12 +105,12 @@ func runArchiveRestore(_ *cobra.Command, _ []string) error {
 		}
 	}
 	if sqlPath == "" {
-		return fmt.Errorf("no .sql file found in tarball")
+		return fmt.Errorf("no .sql file found in %s", dst)
 	}
 	slog.Info("found sql dump", "path", sqlPath)
 
 	if archiveSkipPg {
-		fmt.Fprintf(os.Stdout, "Downloaded + extracted to %s. Skipping psql restore (--skip-pg).\n", sqlPath)
+		fmt.Fprintf(os.Stdout, "Downloaded and extracted to %s. Skipping psql restore (--skip-pg).\n", sqlPath)
 		return nil
 	}
 
@@ -115,12 +118,11 @@ func runArchiveRestore(_ *cobra.Command, _ []string) error {
 	if err := pg.ApplyTuning(ctx, archivePgURI); err != nil {
 		return fmt.Errorf("tuning: %w", err)
 	}
-
 	if err := pg.LoadSQLFile(ctx, archivePgURI, sqlPath); err != nil {
 		return fmt.Errorf("load: %w", err)
 	}
 
-	fmt.Fprintf(os.Stdout, "Archive database provisioned. Restart postgres to apply tuning settings.\n")
+	fmt.Fprintf(os.Stdout, "Archive database provisioned. Restart postgres to apply the tuning settings.\n")
 	return nil
 }
 
@@ -130,12 +132,4 @@ func validateHour(hour string) error {
 		return fmt.Errorf("--hour must be 4 digits (HHMM), got %q", hour)
 	}
 	return nil
-}
-
-// dumpTarballName builds the archive-dump tarball object name for a given
-// dump prefix, date (YYYY-MM-DD), and hour (HHMM):
-//
-//	<prefix>-<date>_<hour>.sql.tar.gz
-func dumpTarballName(prefix, date, hour string) string {
-	return fmt.Sprintf("%s-%s_%s.sql.tar.gz", prefix, date, hour)
 }

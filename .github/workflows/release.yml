@@ -59,25 +59,44 @@ jobs:
             dist/*.deb
 
   publish-apt:
-    name: publish to ${{ matrix.codename }}
+    name: publish ${{ matrix.codename }}/${{ matrix.arch }}
     needs: release
     # Inert until the repository variable PUBLISH_APT is set to "true" and the
-    # AWS credentials are present as secrets. Without the gate a tag push would
-    # fail at the upload step rather than simply not publishing.
+    # credentials are present. Without the gate a tag push would fail at the
+    # upload step on a repository that cannot publish, rather than simply not
+    # publishing.
     if: vars.PUBLISH_APT == 'true'
     runs-on: ubuntu-latest
     strategy:
-      # One codename at a time. deb-s3 rewrites the shared index files of the
-      # bucket, so two jobs uploading at once can lose each other'"'"'s entries.
+      # deb-s3 rewrites the shared index files of a distribution on every
+      # upload, and takes a lock in the bucket to do it. Two jobs uploading at
+      # once contend for that lock and can drop each other's entries.
       max-parallel: 1
+      fail-fast: false
       matrix:
-        codename: [ bullseye, bookworm, focal, jammy, noble ]
+        # amd64 goes to every supported distribution. arm64 goes only to the
+        # two that already declare it: publishing it elsewhere would add an
+        # architecture to a shared, signed, production distribution as a side
+        # effect of releasing this tool.
+        include:
+          - { codename: bullseye, arch: amd64 }
+          - { codename: focal,    arch: amd64 }
+          - { codename: jammy,    arch: amd64 }
+          - { codename: bookworm, arch: amd64 }
+          - { codename: bookworm, arch: arm64 }
+          - { codename: noble,    arch: amd64 }
+          - { codename: noble,    arch: arm64 }
     env:
-      BUCKET: packages.o1test.net
+      BUCKET: stable.apt.packages.minaprotocol.com
       S3_REGION: us-west-2
       COMPONENT: stable
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-west-2
+      SIGN_KEY: ${{ secrets.DEBIAN_SIGN_KEY_ID }}
+      CODENAME: ${{ matrix.codename }}
+      ARCH: ${{ matrix.arch }}
+      VERSION: ${{ needs.release.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -91,49 +110,99 @@ jobs:
           ruby-version: "3.2"
 
       - name: Install deb-s3
-        # The MinaProtocol fork is used, not the upstream gem: the release
-        # tooling in this organisation is built against it.
+        # The MinaProtocol fork, not the upstream gem: the release tooling in
+        # this organisation is built against it, and the three available
+        # variants of deb-s3 do not agree on their command surface.
         run: |
           git clone --depth 1 https://github.com/MinaProtocol/deb-s3.git /tmp/deb-s3
           cd /tmp/deb-s3
           gem build deb-s3.gemspec
           sudo gem install ./deb-s3-*.gem
 
-      - name: Upload packages
+      - name: Import the signing key
         env:
-          CODENAME: ${{ matrix.codename }}
+          GPG_PRIVATE_KEY: ${{ secrets.DEBIAN_SIGN_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.DEBIAN_SIGN_PASSPHRASE }}
         run: |
           set -euo pipefail
-          # One package per call. deb-s3 handles a single upload predictably;
-          # batching several into one call does not report per-package outcomes.
-          for deb in dist/*.deb; do
-            echo "--- uploading $deb to $CODENAME/$COMPONENT"
-            deb-s3 upload \
-              --bucket "$BUCKET" \
-              --s3-region "$S3_REGION" \
-              --codename "$CODENAME" \
-              --component "$COMPONENT" \
-              --preserve-versions \
-              --lock \
-              "$deb"
-          done
+          if [ -z "${SIGN_KEY:-}" ] || [ -z "${GPG_PRIVATE_KEY:-}" ]; then
+            echo "This repository is signed. DEBIAN_SIGN_KEY_ID and DEBIAN_SIGN_PRIVATE_KEY are required." >&2
+            exit 1
+          fi
+          mkdir -p ~/.gnupg && chmod 700 ~/.gnupg
+          # deb-s3 invokes gpg itself, with no terminal attached, so the agent
+          # has to accept a passphrase from the caller instead of a pinentry
+          # prompt.
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          echo "pinentry-mode loopback"  >> ~/.gnupg/gpg.conf
+          echo "use-agent"               >> ~/.gnupg/gpg.conf
+          gpgconf --kill gpg-agent || true
 
-      - name: Verify the packages are listed
-        env:
-          CODENAME: ${{ matrix.codename }}
-          VERSION: ${{ needs.release.outputs.version }}
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          gpg --list-secret-keys --keyid-format LONG
+
+          if [ -n "${GPG_PASSPHRASE:-}" ]; then
+            # Prime the agent with one signature of our own, so the signature
+            # deb-s3 asks for does not need a passphrase it cannot supply.
+            echo priming | gpg --batch --yes --pinentry-mode loopback \
+              --passphrase "$GPG_PASSPHRASE" --local-user "$SIGN_KEY" \
+              --sign --output /dev/null -
+          fi
+
+      - name: Upload the package
         run: |
           set -euo pipefail
-          # deb-s3 exit status is not a reliable verdict on its own, so the
-          # repository is read back and the version has to appear in it.
+          deb="$(ls dist/mina-provision_"${VERSION}"_"${ARCH}".deb)"
+          echo "--- uploading $deb to ${CODENAME}/${COMPONENT}"
+
+          # A release version must not already be present. Overwriting a
+          # published package would change what an operator already installed.
+          uploaded=0
+          for attempt in 1 2 3 4 5; do
+            if deb-s3 upload \
+                 --bucket "$BUCKET" \
+                 --s3-region "$S3_REGION" \
+                 --codename "$CODENAME" \
+                 --component "$COMPONENT" \
+                 --arch "$ARCH" \
+                 --fail-if-exists \
+                 --preserve-versions \
+                 --lock \
+                 --cache-control "no-store,no-cache,must-revalidate" \
+                 --sign "$SIGN_KEY" \
+                 --gpg-options "--batch --pinentry-mode=loopback --yes" \
+                 "$deb"; then
+              uploaded=1
+              break
+            fi
+            echo "attempt $attempt failed; checking for a stale lock"
+            ./.github/scripts/clear-s3-lock.sh "$BUCKET" "$CODENAME" "$COMPONENT" || true
+          done
+          if [ "$uploaded" -ne 1 ]; then
+            echo "upload of $deb to ${CODENAME}/${COMPONENT} failed" >&2
+            exit 1
+          fi
+
+      - name: Verify the package is listed
+        run: |
+          set -euo pipefail
+          # The exit status of deb-s3 is not a reliable verdict on its own, so
+          # the distribution is read back and the version has to appear in it.
           listing="$(deb-s3 list \
             --bucket "$BUCKET" \
             --s3-region "$S3_REGION" \
             --codename "$CODENAME" \
-            --component "$COMPONENT")"
+            --component "$COMPONENT" \
+            --arch "$ARCH")"
           echo "$listing" | grep -E "^mina-provision" || true
           if ! echo "$listing" | grep -q "$VERSION"; then
-            echo "mina-provision $VERSION is not listed in $CODENAME/$COMPONENT after upload" >&2
+            echo "mina-provision $VERSION is absent from ${CODENAME}/${COMPONENT}/${ARCH} after upload" >&2
             exit 1
           fi
-          echo "mina-provision $VERSION is published to $CODENAME/$COMPONENT"
+          echo "mina-provision $VERSION is published to ${CODENAME}/${COMPONENT}/${ARCH}"
+
+      - name: Invalidate the CDN cache
+        # The signed repositories are served through CloudFront. Without this,
+        # apt clients keep reading the previous index and signature for as long
+        # as the edge caches hold them, and the release is invisible.
+        run: ./.github/scripts/invalidate-cdn.sh "$BUCKET" "$CODENAME"

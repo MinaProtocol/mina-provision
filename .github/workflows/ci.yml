@@ -92,5 +92,5 @@ jobs:
       - run: go build -o mina-provision .
       - name: Fetch the mainnet config from the live repository
         run: |
-          ./mina-provision config --network mainnet --channel o1test --out ./out -v
+          ./mina-provision config --network mainnet --out ./out -v
           test -n "$(ls ./out/config_*.json)"

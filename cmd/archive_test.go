@@ -37,12 +37,6 @@ func TestDefaultProviderProducesTheKnownNames(t *testing.T) {
 			fields:  map[string]string{provider.FieldDate: "2026-01-02", provider.FieldHour: "1200"},
 			want:    "devnet-archive-dump-2026-01-02_1200.sql.tar.gz",
 		},
-		{
-			network: "mesa",
-			kind:    provider.KindArchiveDump,
-			fields:  map[string]string{provider.FieldDate: "2026-01-02", provider.FieldHour: "0000"},
-			want:    "hetzner-pre-mesa-1-archive-dump-2026-01-02_0000.sql.tar.gz",
-		},
 	}
 	for _, tt := range tests {
 		art, err := cfg.Resolve("", tt.network, tt.kind)

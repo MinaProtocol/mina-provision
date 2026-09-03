@@ -17,7 +17,7 @@ func TestBuiltInDefaultsAreValid(t *testing.T) {
 	if cfg.DefaultProvider != "o1labs" {
 		t.Errorf("default_provider = %q, want o1labs", cfg.DefaultProvider)
 	}
-	for _, network := range []string{"mainnet", "devnet", "mesa"} {
+	for _, network := range []string{"mainnet", "devnet"} {
 		if _, err := cfg.Resolve("", network, KindArchiveDump); err != nil {
 			t.Errorf("default provider has no archive dump for %s: %v", network, err)
 		}

@@ -35,6 +35,22 @@ A provider does not have to publish all three. `mina-provision blocks
 --provider x` fails with a clear message if `x` publishes no blocks for that
 network, and the other commands keep working.
 
+### The network key is a label, not a derivation
+
+Nothing is derived from the network name. The key groups a set of artifacts;
+the file name comes only from the `name` template. This matters because
+**archive dumps are named after the node that produced them, which is often not
+the network**. Two objects from the Foundation's own bucket:
+
+```
+mainnet-archive-dump-2026-09-03_0000.sql.tar.gz          the node name matches the network
+mina-mesa-rc-1-archive-dump-2026-08-28_0700.sql.tar.gz   it does not
+```
+
+So a network key may legitimately hold a template that mentions a node, and two
+providers may use different keys for the same chain. Write the name the
+publisher actually produces, and never infer one from the other.
+
 ## A local provider
 
 Write the file, point the tool at it, and nothing else changes:

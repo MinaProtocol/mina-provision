@@ -66,20 +66,6 @@ providers:
           package: mina-devnet-config
           checksum: index
 
-      # mesa is the frozen "hetzner-pre-mesa-1" reference network. Its blocks
-      # use the post-hardfork block format, which is why it exists here.
-      mesa:
-        archive_dump:
-          backend: gcs
-          bucket: mina-archive-dumps
-          name: "hetzner-pre-mesa-1-archive-dump-{date}_{hour}.sql.tar.gz"
-          checksum: none
-        precomputed_blocks:
-          backend: gcs
-          bucket: mesa-hf-precomputed-blocks
-          name: "hetzner-pre-mesa-1-{height}-{state_hash}.json"
-          checksum: none
-
   # The mina source tree, for an operator who wants the configuration a
   # specific commit carries. It serves the file under its source-tree name, so
   # the daemon will not auto-load the result; only the package carries the
@@ -98,10 +84,4 @@ providers:
           backend: http
           base_url: https://raw.githubusercontent.com/MinaProtocol/mina
           name: "{ref}/genesis_ledgers/devnet.json"
-          checksum: none
-      mesa:
-        config:
-          backend: http
-          base_url: https://raw.githubusercontent.com/MinaProtocol/mina
-          name: "{ref}/genesis_ledgers/mesa.json"
           checksum: none

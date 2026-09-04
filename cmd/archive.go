@@ -18,11 +18,19 @@ import (
 )
 
 var (
-	archivePgURI   string
-	archiveDate    string
-	archiveHour    string
-	archiveWorkDir string
-	archiveSkipPg  bool
+	archivePgURI     string
+	archiveDate      string
+	archiveHour      string
+	archiveWorkDir   string
+	archiveSkipPg    bool
+	archiveIfPresent string
+)
+
+// What to do when the target database already holds an archive.
+const (
+	ifPresentImport = "import"
+	ifPresentSkip   = "skip"
+	ifPresentFail   = "fail"
 )
 
 // archiveCmd provisions an archive database from a published dump: it fetches
@@ -42,7 +50,25 @@ database.
 
 Dumps are produced hourly, so a restored database is behind the chain tip.
 Fetch the remaining blocks with "mina-provision blocks" and apply them with
-mina-archive.`,
+mina-archive.
+
+A dump import replaces whatever the target database holds. Re-running it
+against an archive that has since advanced therefore moves that archive
+backwards and loses the blocks collected since the dump was taken, which is
+what happens when a one-shot bootstrap container is restarted. Use
+--if-present to say what should happen instead:
+
+  import   restore the dump regardless. The default, and the behaviour of
+           earlier versions.
+  skip     leave the database alone and exit successfully. Nothing is
+           downloaded. This is what a compose stack that may be restarted
+           wants.
+  fail     leave the database alone and exit with an error, for a context
+           where an existing archive means something has gone wrong.
+
+skip and fail act only on positive evidence: a readable blocks table holding
+at least one row. A database that does not exist yet, or cannot be reached, is
+treated as empty, so a first run is never blocked by them.`,
 	RunE: runArchive,
 }
 
@@ -52,11 +78,39 @@ func init() {
 	archiveCmd.Flags().StringVar(&archiveHour, "hour", "0000", "Dump hour in HHMM form (dumps are produced hourly).")
 	archiveCmd.Flags().StringVar(&archiveWorkDir, "work-dir", ".", "Where to download and extract intermediate files.")
 	archiveCmd.Flags().BoolVar(&archiveSkipPg, "skip-pg", false, "Download and extract only; skip the psql restore step.")
+	archiveCmd.Flags().StringVar(&archiveIfPresent, "if-present", ifPresentImport,
+		"What to do when the target database already holds an archive: import (default), skip, or fail.")
 }
 
 func runArchive(_ *cobra.Command, _ []string) error {
 	if !archiveSkipPg && archivePgURI == "" {
 		return fmt.Errorf("--pg-uri is required (or pass --skip-pg to download only)")
+	}
+	switch archiveIfPresent {
+	case ifPresentImport, ifPresentSkip, ifPresentFail:
+	default:
+		return fmt.Errorf("--if-present must be import, skip or fail, got %q", archiveIfPresent)
+	}
+
+	ctx := context.Background()
+
+	// Checked before anything is fetched. The point of skipping is to avoid
+	// the download, which is gigabytes, not merely to avoid the restore.
+	if archiveIfPresent != ifPresentImport && !archiveSkipPg {
+		if p := pg.DetectArchive(ctx, archivePgURI); p.HasArchive {
+			switch archiveIfPresent {
+			case ifPresentSkip:
+				fmt.Fprintf(os.Stdout,
+					"The target database already holds an archive: %d blocks, highest at %d. "+
+						"Nothing was downloaded or changed (--if-present=skip).\n", p.Blocks, p.MaxHeight)
+				return nil
+			case ifPresentFail:
+				return fmt.Errorf("the target database already holds an archive: %d blocks, "+
+					"highest at %d. Importing a dump over it would replace it with an older "+
+					"snapshot and lose everything collected since (--if-present=fail)",
+					p.Blocks, p.MaxHeight)
+			}
+		}
 	}
 
 	art, err := resolveArtifact(provider.KindArchiveDump)
@@ -85,7 +139,6 @@ func runArchive(_ *cobra.Command, _ []string) error {
 	}
 	dst := filepath.Join(archiveWorkDir, filepath.Base(name))
 
-	ctx := context.Background()
 	slog.Info("fetching archive dump", "from", src.Describe(), "object", name, "dst", dst)
 	if err := src.Get(ctx, name, dst); err != nil {
 		return fmt.Errorf("fetch: %w", err)

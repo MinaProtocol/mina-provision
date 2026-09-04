@@ -46,9 +46,39 @@ tuning, and loads the SQL.
 | `--hour` | dump hour, `HHMM`; dumps are produced hourly |
 | `--work-dir` | where the download and the extracted SQL are written |
 | `--skip-pg` | download and extract only |
+| `--if-present` | what to do when the database already holds an archive: `import`, `skip`, `fail` |
 
 `ALTER SYSTEM` writes to `postgresql.auto.conf`, so PostgreSQL must be
 restarted for the tuning to take effect.
+
+#### Re-running against a database that already has an archive
+
+A dump import replaces whatever the target database holds. Re-running it
+against an archive that has since advanced moves that archive **backwards** and
+loses every block collected since the dump was taken. This is what happens when
+a one-shot bootstrap container is restarted — `docker compose down && up` — and
+it costs both the re-download and the newer data.
+
+| `--if-present` | Behaviour |
+|---|---|
+| `import` | restore the dump regardless. The default, and how earlier versions behaved |
+| `skip` | leave the database alone and exit successfully, downloading nothing |
+| `fail` | leave the database alone and exit with an error |
+
+```
+$ mina-provision archive --network mainnet --pg-uri postgres://… --if-present=skip
+The target database already holds an archive: 548146 blocks, highest at 548146.
+Nothing was downloaded or changed (--if-present=skip).
+```
+
+The check runs before the download, so `skip` avoids the gigabytes as well as
+the restore.
+
+`skip` and `fail` act only on **positive evidence**: a readable `blocks` table
+holding at least one row. A database that does not exist yet, one with no
+schema, one whose schema is empty, and a server that cannot be reached are all
+treated as empty. A first run is therefore never blocked, and an unreachable
+server never causes a live archive to be declared missing.
 
 ### `blocks`
 

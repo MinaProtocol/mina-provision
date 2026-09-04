@@ -7,7 +7,8 @@ configuration files.
 ```bash
 mina-provision archive --network mainnet --pg-uri postgres://...   # a database, from a published dump
 mina-provision blocks  --network mainnet --range 50000-51000       # precomputed blocks, onto disk
-mina-provision config  --network mainnet --out /var/lib/coda       # the config file the daemon auto-loads
+mina-provision daemon-config   --network mainnet --out /var/lib/coda  # the config a daemon auto-loads
+mina-provision genesis-config  --network mainnet                      # the fork config a chain starts from
 ```
 
 ## Installing
@@ -25,7 +26,7 @@ sudo dpkg -i mina-provision_<version>_amd64.deb
 
 # or a container
 docker run --rm -v "$PWD/out:/out" ghcr.io/minaprotocol/mina-provision \
-  config --network mainnet --out /out
+  daemon-config --network mainnet --out /out
 ```
 
 `postgresql-client` is a recommendation, not a dependency. Only `archive`
@@ -67,9 +68,9 @@ at that height.
 An open-ended range stops after 1000 consecutive heights with no block. A
 single run fetches at most 50000 blocks.
 
-### `config`
+### `daemon-config`
 
-Fetches the runtime configuration for a network.
+Fetches the runtime configuration a daemon auto-loads.
 
 | Flag | Meaning |
 |---|---|
@@ -97,6 +98,60 @@ With no `--version`, the highest version is chosen by Debian ordering — the
 package `apt` itself would install. Debian ordering is not upload order, so a
 build with a longer version string can outrank a newer one. Pin with
 `--version` when a specific build is meant.
+
+### `genesis-config`
+
+Fetches the fork configuration a chain starts from: the fork point, the ledger
+and epoch ledger hashes, and the genesis timestamp. An archive node and the
+replayer both need it to start.
+
+It names no accounts, so it stays about a kilobyte however large the ledger is.
+Whichever program consumes it resolves the ledger from the hashes it carries,
+downloading and verifying the ledger itself.
+
+It is regenerated as the chain advances, so the command reports which fork
+point arrived:
+
+```
+Wrote ./mainnet-ledger.json
+  fork state hash: 3NKHyxzgM9z4C1wUz5ZhJBmNhtDzDQGr1PGvWRwiCUcFvsdTco2T
+  blockchain length: 548146
+  global slot since genesis: 958440
+```
+
+This is a different artifact from `daemon-config`. That one is the runtime
+configuration a daemon auto-loads from its own installation.
+
+### `replayer-input`
+
+Rewrites a fork configuration into the input file the replayer reads.
+
+```bash
+mina-provision genesis-config --network mainnet
+mina-provision replayer-input --from mainnet-ledger.json --out replayer-input.json
+```
+
+| Flag | Meaning |
+|---|---|
+| `--from` | the fork configuration to convert; required |
+| `--out` | where to write it; `-` for standard output |
+| `--start-slot` | slot to start replaying from; default `0`, a full replay |
+| `--target-state-hash` | state hash to stop at; omitted means run to the end |
+
+The replayer takes three fields, and the ledger it takes is the same type as
+the `ledger` object in a fork configuration, so that object is copied across
+unchanged — by its hashes, not expanded into accounts. The replayer resolves a
+ledger given only its hash, so this command never reads ledger data and the
+result stays small. A configuration that states its accounts converts equally
+well: whatever the `ledger` object holds is what the replayer receives.
+
+Two values are **not** inferred, because the fork point and the replay range
+are different things. `--start-slot` defaults to `0` rather than to the fork's
+slot, and no stop point is set unless `--target-state-hash` is given.
+
+The epoch ledger hashes and seeds are not carried over. The replayer input has
+no field for them and the replayer rebuilds epoch ledgers from the archive
+database; the command says so when it drops them.
 
 ## Providers
 
@@ -167,7 +222,7 @@ Backends:
 | `gcs` | a public Google Cloud Storage bucket | yes |
 | `http` | any web server | only with an `index:` |
 | `file` | a local or mounted directory | yes |
-| `apt` | a Debian repository; `config` only | not applicable |
+| `apt` | a Debian repository; `daemon_config` only | not applicable |
 
 A web server cannot be enumerated, so `blocks` needs an `index:` URL — one
 object name per line — from an `http` provider. Without it the command reports
@@ -181,7 +236,8 @@ rejected when the configuration is read:
 |---|---|
 | `archive_dump` | `{date}`, `{hour}`  |
 | `precomputed_blocks` | `{height}`, `{state_hash}` |
-| `config` | `{ref}` |
+| `daemon_config` | `{ref}` |
+| `genesis_config` | none — one fixed name per network |
 
 ### Verification
 

@@ -14,7 +14,7 @@ const (
 	FieldHour      = "hour"       // archive dump, HHMM
 	FieldHeight    = "height"     // precomputed block
 	FieldStateHash = "state_hash" // precomputed block
-	FieldRef       = "ref"        // config fetched from a source tree
+	FieldRef       = "ref"        // configuration fetched from a source tree
 )
 
 // allowedFields says which fields each artifact kind may use. A template that
@@ -23,7 +23,10 @@ const (
 var allowedFields = map[Kind][]string{
 	KindArchiveDump:       {FieldDate, FieldHour},
 	KindPrecomputedBlocks: {FieldHeight, FieldStateHash},
-	KindConfig:            {FieldRef},
+	KindDaemonConfig:      {FieldRef},
+	// A fork configuration is published under one fixed name per network, so
+	// its template takes no fields.
+	KindGenesisConfig: {},
 }
 
 // AllowedFields lists the fields a kind may use, for error messages.

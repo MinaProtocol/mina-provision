@@ -31,7 +31,7 @@ var (
 const configDir = "var/lib/coda"
 
 var configCmd = &cobra.Command{
-	Use:   "config",
+	Use:   "daemon-config",
 	Short: "Provision the runtime configuration file a daemon auto-loads",
 	Long: `Fetches the runtime configuration for a network and writes it into a
 local directory.
@@ -45,7 +45,10 @@ for it, which is always checked.
 
 The same JSON exists in the mina source tree. "--provider github --ref <tag>"
 fetches it from there, but it arrives under the source-tree name, so the
-daemon will not auto-load it.`,
+daemon will not auto-load it.
+
+This is not the same thing as "genesis-config", which fetches the fork
+configuration a chain starts from.`,
 	RunE: runConfig,
 }
 
@@ -61,7 +64,7 @@ func init() {
 }
 
 func runConfig(_ *cobra.Command, _ []string) error {
-	art, err := resolveArtifact(provider.KindConfig)
+	art, err := resolveArtifact(provider.KindDaemonConfig)
 	if err != nil {
 		return err
 	}

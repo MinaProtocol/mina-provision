@@ -89,3 +89,23 @@ func TestParseHeights(t *testing.T) {
 		})
 	}
 }
+
+func TestParseCountAndHeight(t *testing.T) {
+	count, height, err := parseCountAndHeight("428|548146\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 428 || height != 548146 {
+		t.Errorf("got count=%d height=%d, want 428 and 548146", count, height)
+	}
+}
+
+func TestParseCountAndHeightRejectsUnexpectedOutput(t *testing.T) {
+	// Anything unparseable must be an error, not a zero. A silent zero would
+	// read as "no archive here" and let a dump overwrite a live database.
+	for _, out := range []string{"", "428", "428|", "|5", "a|b", "1|2|3"} {
+		if _, _, err := parseCountAndHeight(out); err == nil {
+			t.Errorf("%q should have been rejected", out)
+		}
+	}
+}

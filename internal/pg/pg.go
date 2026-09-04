@@ -118,3 +118,72 @@ func run(ctx context.Context, name string, args ...string) error {
 	}
 	return nil
 }
+
+// Presence describes what a target database already holds.
+type Presence struct {
+	// HasArchive is true only on positive evidence: the blocks table exists
+	// and can be read. A database that cannot be reached, or does not exist
+	// yet, leaves this false.
+	HasArchive bool
+
+	// MaxHeight and Blocks describe what is there, for reporting. They are
+	// meaningful only when HasArchive is true.
+	MaxHeight int
+	Blocks    int
+}
+
+// DetectArchive reports whether uri already holds an archive.
+//
+// Every failure is reported as "no archive found", never as an error, and the
+// reason is logged. The caller acts on this to decide whether to skip work, so
+// acting on anything less than positive evidence would be wrong in both
+// directions: a database that does not exist yet must be filled, and one that
+// cannot be reached must not be declared empty.
+func DetectArchive(ctx context.Context, uri string) Presence {
+	// to_regclass returns NULL rather than raising when the table is absent,
+	// so this one statement is safe against an empty or foreign database.
+	out, err := query(ctx, uri, "SELECT to_regclass('public.blocks') IS NOT NULL")
+	if err != nil {
+		slog.Debug("could not inspect the target database; treating it as empty", "err", err)
+		return Presence{}
+	}
+	if strings.TrimSpace(out) != "t" {
+		slog.Debug("no blocks table in the target database")
+		return Presence{}
+	}
+
+	out, err = query(ctx, uri, "SELECT count(*), COALESCE(MAX(height), 0) FROM blocks")
+	if err != nil {
+		slog.Debug("blocks table present but unreadable; treating it as empty", "err", err)
+		return Presence{}
+	}
+	count, height, err := parseCountAndHeight(out)
+	if err != nil {
+		slog.Debug("could not read the blocks table", "err", err)
+		return Presence{}
+	}
+	if count == 0 {
+		// A schema with no rows is a database waiting to be filled, not an
+		// archive worth protecting.
+		slog.Debug("blocks table is present but empty")
+		return Presence{}
+	}
+	return Presence{HasArchive: true, MaxHeight: height, Blocks: count}
+}
+
+// parseCountAndHeight reads the "count|height" pair psql -tA prints.
+func parseCountAndHeight(out string) (count, height int, err error) {
+	fields := strings.Split(strings.TrimSpace(out), "|")
+	if len(fields) != 2 {
+		return 0, 0, fmt.Errorf("unexpected psql output %q", out)
+	}
+	count, err = strconv.Atoi(strings.TrimSpace(fields[0]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse block count %q: %w", fields[0], err)
+	}
+	height, err = strconv.Atoi(strings.TrimSpace(fields[1]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("parse max height %q: %w", fields[1], err)
+	}
+	return count, height, nil
+}

@@ -23,15 +23,16 @@ provider  ->  network  ->  artifact
 ```
 
 An artifact says where one kind of file lives, how it is named, and how it is
-verified. Three kinds exist:
+verified. Four kinds exist:
 
 | Kind | Fetched by | Name template fields |
 |---|---|---|
 | `archive_dump` | `mina-provision archive` | `{date}`, `{hour}` |
 | `precomputed_blocks` | `mina-provision blocks` | `{height}`, `{state_hash}` |
-| `config` | `mina-provision config` | `{ref}` |
+| `daemon_config` | `mina-provision daemon-config` | `{ref}` |
+| `genesis_config` | `mina-provision genesis-config` | none — one fixed name per network |
 
-A provider does not have to publish all three. `mina-provision blocks
+A provider does not have to publish every kind. `mina-provision blocks
 --provider x` fails with a clear message if `x` publishes no blocks for that
 network, and the other commands keep working.
 
@@ -75,7 +76,7 @@ artifact. Three consequences worth knowing before writing one:
 - Adding a provider does not mean restating the default entries. They stay,
   and they keep receiving updates when the tool is upgraded.
 - Overriding one artifact leaves the provider's other artifacts alone. This
-  file makes `blocks` read a local directory while `archive` and `config`
+  file makes `blocks` read a local directory while `archive` and the config
   still read the Foundation's endpoints:
 
   ```yaml
@@ -104,7 +105,7 @@ To make your provider the one used when `--provider` is not given, set
 | `gcs` | a public Google Cloud Storage bucket | `bucket` | yes |
 | `http` | any web server | `base_url` | only with `index` |
 | `file` | a local or mounted directory | `path` | yes |
-| `apt` | a Debian repository, `config` only | `repository`, `package` | not applicable |
+| `apt` | a Debian repository, `daemon_config` only | `repository`, `package` | not applicable |
 
 ### `file` — a staged directory
 
@@ -160,14 +161,14 @@ than reporting no blocks — which would read as "that block is not published".
 
 ### `apt` — a Debian repository
 
-Only for `config`, and only because of what the daemon loads. The daemon
+Only for `daemon_config`, and only because of what the daemon loads. The daemon
 auto-loads `/var/lib/coda/config_<hash>.json`, where the hash is derived from
 the commit at build time and is not the hash in the package version. The
 package is the only published artifact carrying both the right content and the
 right file name.
 
 ```yaml
-config:
+daemon_config:
   backend: apt
   repository: https://packages.o1test.net
   codename: noble

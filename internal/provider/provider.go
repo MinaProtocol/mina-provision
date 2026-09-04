@@ -31,10 +31,16 @@ var defaultYAML []byte
 // Kind names an artifact a provider can publish.
 type Kind string
 
+// AllKinds lists every artifact kind, for validation and for listings.
+var AllKinds = []Kind{
+	KindArchiveDump, KindPrecomputedBlocks, KindDaemonConfig, KindGenesisConfig,
+}
+
 const (
 	KindArchiveDump       Kind = "archive_dump"
 	KindPrecomputedBlocks Kind = "precomputed_blocks"
-	KindConfig            Kind = "config"
+	KindDaemonConfig      Kind = "daemon_config"
+	KindGenesisConfig     Kind = "genesis_config"
 )
 
 // Config is a whole provider file.
@@ -54,7 +60,17 @@ type Provider struct {
 type Network struct {
 	ArchiveDump       *Artifact `yaml:"archive_dump,omitempty"`
 	PrecomputedBlocks *Artifact `yaml:"precomputed_blocks,omitempty"`
-	Config            *Artifact `yaml:"config,omitempty"`
+
+	// DaemonConfig is the runtime configuration a daemon auto-loads, published
+	// as a Debian package because only the package carries the
+	// config_<hash>.json name the daemon looks for.
+	DaemonConfig *Artifact `yaml:"daemon_config,omitempty"`
+
+	// GenesisConfig is the fork configuration a forked chain starts from: the
+	// fork point, the ledger and epoch hashes, and the genesis timestamp. An
+	// archive node and the replayer both need it. It names no accounts; the
+	// ledger itself is resolved from the hashes it carries.
+	GenesisConfig *Artifact `yaml:"genesis_config,omitempty"`
 }
 
 // Artifact says where one kind of file lives and how it is named.
@@ -212,14 +228,12 @@ func merge(base, over Config) Config {
 				merged.Networks[n] = on
 				continue
 			}
-			if on.ArchiveDump != nil {
-				bn.ArchiveDump = on.ArchiveDump
-			}
-			if on.PrecomputedBlocks != nil {
-				bn.PrecomputedBlocks = on.PrecomputedBlocks
-			}
-			if on.Config != nil {
-				bn.Config = on.Config
+			// Driven by AllKinds rather than a field per kind, so adding a
+			// kind cannot silently stop being mergeable.
+			for _, kind := range AllKinds {
+				if a := on.artifact(kind); a != nil {
+					bn.setArtifact(kind, a)
+				}
 			}
 			merged.Networks[n] = bn
 		}
@@ -252,14 +266,32 @@ func (c *Config) Resolve(providerName, networkName string, kind Kind) (*Artifact
 	return a, nil
 }
 
+// setArtifact replaces the artifact of one kind. It is the write side of
+// artifact(), and the two must stay in step: a kind handled by one and not the
+// other would be readable but not overridable, or the reverse.
+func (n *Network) setArtifact(kind Kind, a *Artifact) {
+	switch kind {
+	case KindArchiveDump:
+		n.ArchiveDump = a
+	case KindPrecomputedBlocks:
+		n.PrecomputedBlocks = a
+	case KindDaemonConfig:
+		n.DaemonConfig = a
+	case KindGenesisConfig:
+		n.GenesisConfig = a
+	}
+}
+
 func (n Network) artifact(kind Kind) *Artifact {
 	switch kind {
 	case KindArchiveDump:
 		return n.ArchiveDump
 	case KindPrecomputedBlocks:
 		return n.PrecomputedBlocks
-	case KindConfig:
-		return n.Config
+	case KindDaemonConfig:
+		return n.DaemonConfig
+	case KindGenesisConfig:
+		return n.GenesisConfig
 	default:
 		return nil
 	}
@@ -295,7 +327,7 @@ func validate(c *Config) error {
 	}
 	for pn, p := range c.Providers {
 		for nn, n := range p.Networks {
-			for _, kind := range []Kind{KindArchiveDump, KindPrecomputedBlocks, KindConfig} {
+			for _, kind := range AllKinds {
 				a := n.artifact(kind)
 				if a == nil {
 					continue
@@ -327,8 +359,8 @@ func (a *Artifact) validate(kind Kind) error {
 		if a.Repository == "" || a.Package == "" {
 			return fmt.Errorf("backend apt needs a repository and a package")
 		}
-		if kind != KindConfig {
-			return fmt.Errorf("backend apt is only meaningful for the config artifact")
+		if kind != KindDaemonConfig {
+			return fmt.Errorf("backend apt is only meaningful for the daemon_config artifact")
 		}
 	case "":
 		return fmt.Errorf("no backend given (one of gcs, http, file, apt)")

@@ -34,9 +34,14 @@ operator documentation and compose stacks.
 
 Each subcommand names the thing being provisioned:
 
-  archive   an archive database, from a published dump
-  blocks    precomputed blocks, onto local disk
-  config    the runtime configuration file a daemon auto-loads
+  archive         an archive database, from a published dump
+  blocks          precomputed blocks, onto local disk
+  daemon-config   the runtime configuration a daemon auto-loads
+  genesis-config  the fork configuration a chain starts from
+
+It also converts between them:
+
+  replayer-input  a fork configuration, rewritten as a replayer input
 
 The tool only fetches, verifies and places files. It does not write blocks
 into an archive database -- that is mina-archive's own work.`,
@@ -97,6 +102,8 @@ func init() {
 	rootCmd.AddCommand(archiveCmd)
 	rootCmd.AddCommand(blocksCmd)
 	rootCmd.AddCommand(configCmd)
+	rootCmd.AddCommand(genesisConfigCmd)
+	rootCmd.AddCommand(replayerInputCmd)
 }
 
 // SetVersion records the build version so `mina-provision --version` reports

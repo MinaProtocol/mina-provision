@@ -37,7 +37,7 @@ providers:
           bucket: mina_network_block_data
           name: "mainnet-{height}-{state_hash}.json"
           checksum: none
-        config:
+        daemon_config:
           backend: apt
           repository: https://packages.o1test.net
           codename: noble
@@ -46,6 +46,14 @@ providers:
           # The repository index publishes a SHA256 for every package, and it
           # is always checked.
           checksum: index
+        # The fork configuration a forked chain starts from. It is regenerated
+        # as the chain advances, so there is one object per network rather than
+        # one per date, and its name takes no template fields.
+        genesis_config:
+          backend: http
+          base_url: https://storage.googleapis.com/o1labs-gitops-infrastructure
+          name: "mainnet/mainnet-ledger.json"
+          checksum: none
 
       devnet:
         archive_dump:
@@ -58,13 +66,18 @@ providers:
           bucket: mina_network_block_data
           name: "devnet-{height}-{state_hash}.json"
           checksum: none
-        config:
+        daemon_config:
           backend: apt
           repository: https://packages.o1test.net
           codename: noble
           component: stable
           package: mina-devnet-config
           checksum: index
+        genesis_config:
+          backend: http
+          base_url: https://storage.googleapis.com/o1labs-gitops-infrastructure
+          name: "devnet/devnet-ledger.json"
+          checksum: none
 
   # The mina source tree, for an operator who wants the configuration a
   # specific commit carries. It serves the file under its source-tree name, so
@@ -74,13 +87,13 @@ providers:
     description: mina source tree at a git ref (source-tree names, not daemon names)
     networks:
       mainnet:
-        config:
+        daemon_config:
           backend: http
           base_url: https://raw.githubusercontent.com/MinaProtocol/mina
           name: "{ref}/genesis_ledgers/mainnet.json"
           checksum: none
       devnet:
-        config:
+        daemon_config:
           backend: http
           base_url: https://raw.githubusercontent.com/MinaProtocol/mina
           name: "{ref}/genesis_ledgers/devnet.json"

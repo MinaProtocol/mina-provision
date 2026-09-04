@@ -90,6 +90,17 @@ jobs:
           test "$(stat -c %U:%G /usr/bin/mina-provision)" = "root:root"
           mina-provision --help
 
+      - name: Every documented command exists
+        # The live job is the only other place these names are typed, and it
+        # does not run on a pull request -- so without this check a rename
+        # passes review and fails on the next scheduled run instead.
+        run: |
+          set -euo pipefail
+          for c in archive blocks daemon-config genesis-config replayer-input; do
+            echo "--- $c"
+            mina-provision "$c" --help > /dev/null
+          done
+
   live:
     name: live artifact check
     # The default tests never touch the network. This job does, so it runs on a
@@ -105,7 +116,16 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go build -o mina-provision .
-      - name: Fetch the mainnet config from the live repository
+      - name: Fetch the daemon config from the live repository
         run: |
-          ./mina-provision config --network mainnet --out ./out -v
+          ./mina-provision daemon-config --network mainnet --out ./out -v
           test -n "$(ls ./out/config_*.json)"
+
+      - name: Fetch the fork config and convert it for the replayer
+        run: |
+          set -euo pipefail
+          ./mina-provision genesis-config --network mainnet --out ./out -v
+          ./mina-provision replayer-input --from ./out/mainnet-ledger.json --out ./out/replayer-input.json
+          # The replayer needs a ledger it can resolve; an input without one
+          # would fail much later, inside a replay.
+          test -n "$(jq -r '.genesis_ledger.hash // empty' ./out/replayer-input.json)"

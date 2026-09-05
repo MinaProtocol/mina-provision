@@ -34,6 +34,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The .deb records the tag with the leading "v" removed, so the image
+      # has to do the same or `mina-provision --version` reports a different
+      # string depending on how it was installed. On a branch push the ref name
+      # is used as it is.
+      - id: version
+        run: |
+          v="${GITHUB_REF_NAME}"
+          echo "version=${v#v}" >> "$GITHUB_OUTPUT"
+
       - id: meta
         uses: docker/metadata-action@v5
         with:
@@ -50,4 +59,4 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ github.ref_name }}
+          build-args: VERSION=${{ steps.version.outputs.version }}

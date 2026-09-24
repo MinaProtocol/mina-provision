@@ -18,8 +18,12 @@ func TestBuiltInDefaultsAreValid(t *testing.T) {
 		t.Errorf("default_provider = %q, want o1labs", cfg.DefaultProvider)
 	}
 	for _, network := range []string{"mainnet", "devnet"} {
-		if _, err := cfg.Resolve("", network, KindArchiveDump); err != nil {
+		dump, err := cfg.Resolve("", network, KindArchiveDump)
+		if err != nil {
 			t.Errorf("default provider has no archive dump for %s: %v", network, err)
+		} else if dump.Database != "archive" {
+			// The published dumps start with CREATE DATABASE archive.
+			t.Errorf("%s archive dump database = %q, want archive", network, dump.Database)
 		}
 		if _, err := cfg.Resolve("", network, KindPrecomputedBlocks); err != nil {
 			t.Errorf("default provider has no blocks for %s: %v", network, err)
@@ -143,6 +147,22 @@ providers:
     networks:
       mainnet:
         archive_dump: {backend: gcs, bucket: b, name: "a-{date}"}
+`,
+		"database on an artifact that is not a dump": `
+version: 1
+providers:
+  x:
+    networks:
+      mainnet:
+        precomputed_blocks: {backend: gcs, bucket: b, name: "m-{height}-{state_hash}.json", database: archive}
+`,
+		"database name that needs quoting": `
+version: 1
+providers:
+  x:
+    networks:
+      mainnet:
+        archive_dump: {backend: gcs, bucket: b, name: "a-{date}", database: "Archive; drop"}
 `,
 		"misspelt key": `
 version: 1

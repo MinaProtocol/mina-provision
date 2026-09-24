@@ -27,6 +27,11 @@ providers:
           backend: gcs
           bucket: mina-archive-dumps
           name: "mainnet-archive-dump-{date}_{hour}.sql.tar.gz"
+          # The dumps are made with pg_dump --create: they start with
+          # "CREATE DATABASE archive" and "\connect archive", so they restore
+          # into `archive` whatever database --pg-uri names. The header is
+          # checked against this value before a dump is loaded.
+          database: archive
           # No independent digest is published beside these objects. The
           # transfer itself is checked by the storage client and by the
           # expected object size. A mirror that publishes "<file>.sha256"
@@ -60,6 +65,7 @@ providers:
           backend: gcs
           bucket: mina-archive-dumps
           name: "devnet-archive-dump-{date}_{hour}.sql.tar.gz"
+          database: archive
           checksum: none
         precomputed_blocks:
           backend: gcs

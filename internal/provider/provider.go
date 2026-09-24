@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -94,11 +95,21 @@ type Artifact struct {
 	// Checksum states how the download is verified: index, sidecar or none.
 	Checksum string `yaml:"checksum,omitempty"`
 
+	// Database is the database an archive dump creates and restores into,
+	// for a dump made with pg_dump --create. Such a dump restores there
+	// whatever database --pg-uri names. Empty for a dump without CREATE
+	// DATABASE, which restores into the database --pg-uri names.
+	Database string `yaml:"database,omitempty"` // archive_dump
+
 	Repository string `yaml:"repository,omitempty"` // apt
 	Codename   string `yaml:"codename,omitempty"`   // apt
 	Component  string `yaml:"component,omitempty"`  // apt
 	Package    string `yaml:"package,omitempty"`    // apt
 }
+
+// databaseName is a name pg_dump writes without quotes, which is also one that
+// needs none in a URI or in the messages that show it.
+var databaseName = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
 // Checksum modes.
 const (
@@ -375,6 +386,15 @@ func (a *Artifact) validate(kind Kind) error {
 	}
 	if a.Checksum == ChecksumIndex && a.Backend != BackendAPT {
 		return fmt.Errorf("checksum: index needs an index to read, which only the apt backend has")
+	}
+
+	if a.Database != "" {
+		if kind != KindArchiveDump {
+			return fmt.Errorf("database is only meaningful for the archive_dump artifact")
+		}
+		if !databaseName.MatchString(a.Database) {
+			return fmt.Errorf("database %q is not a plain PostgreSQL name (lower case letters, digits, _)", a.Database)
+		}
 	}
 
 	if a.Backend != BackendAPT {

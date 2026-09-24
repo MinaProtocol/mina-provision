@@ -97,3 +97,31 @@ func TestValidateHour(t *testing.T) {
 		})
 	}
 }
+
+func TestRestoreTarget(t *testing.T) {
+	const server = "postgres://u:p@h:5432"
+	tests := []struct {
+		name, database, uri string
+		wantDB, wantConnect string
+		wantErr             bool
+	}{
+		{"dump creates its database, uri names a maintenance db", "archive", server + "/postgres", "archive", server + "/postgres", false},
+		{"dump creates its database, uri names it", "archive", server + "/archive", "archive", server + "/postgres", false},
+		{"dump creates its database, uri names another", "archive", server + "/mina", "archive", server + "/mina", false},
+		{"dump creates its database, uri names none", "archive", server, "archive", server + "/postgres", false},
+		{"plain dump restores where the uri points", "", server + "/mina", "mina", server + "/mina", false},
+		{"plain dump needs a database in the uri", "", server, "", "", true},
+		{"not a postgres uri", "archive", "host=h dbname=x", "", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, connect, err := restoreTarget(&provider.Artifact{Database: tt.database}, tt.uri)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if db != tt.wantDB || connect != tt.wantConnect {
+				t.Errorf("got %q, %q; want %q, %q", db, connect, tt.wantDB, tt.wantConnect)
+			}
+		})
+	}
+}

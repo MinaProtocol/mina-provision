@@ -44,41 +44,113 @@ rewrite and re-sign a `Release` file that other packages depend on.
 the gate, a tag push would fail at the upload step on a repository that has no
 credentials, rather than simply not publishing.
 
+The credentials are kept in the `apt-publish` environment, never at repository
+level. A repository-level secret is readable by a workflow on any branch, so
+anyone with push access could read it. An environment secret is given only to a
+job that names the environment, and only after the environment's protection
+rules pass.
+
+Create the environment once (repository admin):
+
+- **Settings → Environments → New environment**, name `apt-publish`.
+- **Required reviewers:** the release owners.
+- **Deployment branches and tags:** "Selected branches and tags", add the tag
+  pattern `v*`.
+
+Then set the secrets in it:
+
 ```bash
-# S3 write access to the bucket, plus CloudFront invalidation
-gh secret set AWS_ACCESS_KEY_ID          --repo MinaProtocol/mina-provision
-gh secret set AWS_SECRET_ACCESS_KEY      --repo MinaProtocol/mina-provision
+E="--env apt-publish --repo MinaProtocol/mina-provision"
 
 # the repository is signed, so the packages must be signed too
-gh secret set DEBIAN_SIGN_KEY_ID         --repo MinaProtocol/mina-provision
-gh secret set DEBIAN_SIGN_PRIVATE_KEY    --repo MinaProtocol/mina-provision  # armoured private key
-gh secret set DEBIAN_SIGN_PASSPHRASE     --repo MinaProtocol/mina-provision  # omit if the key has none
+gh secret set DEBIAN_SIGN_KEY_ID      $E
+gh secret set DEBIAN_SIGN_PRIVATE_KEY $E   # armoured signing subkey, see below
+gh secret set DEBIAN_SIGN_PASSPHRASE  $E   # the passphrase of that subkey
 
-gh variable set PUBLISH_APT --body true  --repo MinaProtocol/mina-provision
+# AWS: preferred, a role assumed through GitHub OIDC (no stored AWS secret)
+gh variable set AWS_ROLE_ARN --body arn:aws:iam::<account>:role/<role> --repo MinaProtocol/mina-provision
+# or, only until the role exists, static keys
+gh secret set AWS_ACCESS_KEY_ID       $E
+gh secret set AWS_SECRET_ACCESS_KEY   $E
+
+gh variable set PUBLISH_APT --body true --repo MinaProtocol/mina-provision
 ```
 
-`DEBIAN_SIGN_PRIVATE_KEY` is the armoured export of the key that signs the
-repository:
+When `AWS_ROLE_ARN` is set, the static keys are ignored; delete them from the
+environment and from IAM after the first release that uses the role.
+
+`DEBIAN_SIGN_PRIVATE_KEY` is a signing-only subkey of the key that signs the
+repository, exported with a passphrase. The primary key stays offline:
 
 ```bash
-gpg --armor --export-secret-keys <key-id>
+gpg --quick-add-key <primary-fpr> ed25519 sign 1y   # or rsa4096, to match the primary
+gpg --armor --export-secret-subkeys <subkey-id>!    # the "!" exports this subkey only
 ```
 
-The AWS credentials need:
+apt verifies a subkey signature against the primary public key, so clients need
+no change.
 
-| Permission | For |
-|---|---|
-| `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:ListBucket` on the bucket | uploading and rewriting the distribution index |
-| `cloudfront:ListDistributions`, `cloudfront:CreateInvalidation` | making the new index visible |
+### The AWS role
+
+The trust policy accepts only this repository's release environment:
+
+```json
+"Condition": {
+  "StringEquals": {
+    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+    "token.actions.githubusercontent.com:sub": "repo:MinaProtocol/mina-provision:environment:apt-publish"
+  }
+}
+```
+
+The role (or, until then, the static keys) needs:
+
+| Permission | Resource | For |
+|---|---|---|
+| `s3:ListBucket` | the bucket | reading the distribution |
+| `s3:GetObject` | `dists/*`, `pool/*` | reading the index and checking for an existing package |
+| `s3:PutObject` | `dists/*`, `pool/*/m/mi/mina-provision*` | the package, the index and the signed `Release` |
+| `s3:DeleteObject` | `dists/*/lockfile*`, `dists/*/*/binary-/lockfile` | releasing and clearing the upload lock |
+| `cloudfront:ListDistributions` | `*` | finding the distribution |
+| `cloudfront:CreateInvalidation` | the one distribution | making the new index visible |
+
+It must not have `s3:DeleteObject` on the whole bucket: other Mina packages are
+served from it.
 
 The bucket is named after the repository, `stable.apt.packages.minaprotocol.com`,
 in `us-west-2`.
+
+### Repository settings
+
+These are part of the release's security, not only of this workflow
+(repository admin):
+
+- A **tag ruleset** on `refs/tags/v*`: only release owners may create, and
+  nobody may update or delete.
+- **Branch protection** on `main`: pull request, at least one approval, passing
+  CI.
+- **Actions → Workflow permissions:** read repository contents; do not let
+  Actions approve pull requests. Each workflow asks for more only where it
+  needs it.
+- **Actions → Require actions to be pinned to a full-length commit SHA.**
+- The same protection on `main` of `MinaProtocol/deb-s3`, whose code runs in the
+  release job.
 
 ## Choices worth knowing
 
 **Signing is not optional.** The job fails if `DEBIAN_SIGN_KEY_ID` or
 `DEBIAN_SIGN_PRIVATE_KEY` is missing. An unsigned package in a signed
 repository breaks `apt update` for every client of that distribution.
+
+**Tooling and actions are pinned.** `deb-s3` is built from a fixed commit
+(`DEB_S3_COMMIT` in `release.yml`) and every action from a full commit SHA.
+Code that runs next to the release credentials changes only through a reviewed
+change to this repository. Dependabot proposes the action updates; a `deb-s3`
+update is a manual change of the commit after a review of its diff.
+
+**Secrets reach only the steps that use them.** No secret is set at job level.
+The AWS credentials are configured after `deb-s3` is installed, and the signing
+key ID is given only to the import and upload steps.
 
 **The gpg agent is primed before deb-s3 runs.** `deb-s3` invokes `gpg` itself,
 with no terminal attached, so the agent is configured for loopback pinentry and

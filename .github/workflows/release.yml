@@ -8,6 +8,11 @@ on:
   push:
     tags: [ 'v*' ]
 
+# Read-only unless a job asks for more. The repository default grants write
+# to every scope, so a job without its own block would otherwise get it.
+permissions:
+  contents: read
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
@@ -20,9 +25,9 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
           cache: true
@@ -45,13 +50,13 @@ jobs:
           done
           ls -l dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: packages
           path: dist/*.deb
           retention-days: 7
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           generate_release_notes: true
           files: |
@@ -66,6 +71,14 @@ jobs:
     # upload step on a repository that cannot publish, rather than simply not
     # publishing.
     if: vars.PUBLISH_APT == 'true'
+    # The signing key and the AWS credentials live in this environment, not in
+    # the repository. The environment's protection rules (required reviewers,
+    # deployment restricted to v* tags) decide whether this job gets them.
+    environment: apt-publish
+    permissions:
+      contents: read
+      # Only for the OIDC exchange with AWS when vars.AWS_ROLE_ARN is set.
+      id-token: write
     runs-on: ubuntu-latest
     strategy:
       # deb-s3 rewrites the shared index files of a distribution on every
@@ -90,22 +103,21 @@ jobs:
       BUCKET: stable.apt.packages.minaprotocol.com
       S3_REGION: us-west-2
       COMPONENT: stable
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: us-west-2
-      SIGN_KEY: ${{ secrets.DEBIAN_SIGN_KEY_ID }}
+      # No secret is set at job level: every step, including the ones that
+      # run third-party code, would see it. Each secret is given only to the
+      # steps that use it.
       CODENAME: ${{ matrix.codename }}
       ARCH: ${{ matrix.arch }}
       VERSION: ${{ needs.release.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: packages
           path: dist
 
-      - uses: ruby/setup-ruby@v1
+      - uses: ruby/setup-ruby@762794c140bbeda0f1224786aa33b4b46783a6c1 # v1.326.0
         with:
           ruby-version: "3.2"
 
@@ -113,14 +125,40 @@ jobs:
         # The MinaProtocol fork, not the upstream gem: the release tooling in
         # this organisation is built against it, and the three available
         # variants of deb-s3 do not agree on their command surface.
+        #
+        # Pinned to a reviewed commit. This code later runs with the AWS
+        # credentials and the signing key, so a new commit on the fork's
+        # master must not reach a release without a change here.
+        env:
+          DEB_S3_COMMIT: 1f3bfb6f51d991bf40e672f65c9e65675ef785c9
         run: |
-          git clone --depth 1 https://github.com/MinaProtocol/deb-s3.git /tmp/deb-s3
+          set -euo pipefail
+          git init -q /tmp/deb-s3
           cd /tmp/deb-s3
+          git fetch -q --depth 1 https://github.com/MinaProtocol/deb-s3.git "$DEB_S3_COMMIT"
+          git checkout -q --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$DEB_S3_COMMIT"
+          echo "deb-s3 at $(git rev-parse HEAD)"
           gem build deb-s3.gemspec
           sudo gem install ./deb-s3-*.gem
 
+      # After the install, so that no third-party build step runs with AWS
+      # credentials. With vars.AWS_ROLE_ARN set, the job assumes that role
+      # through GitHub OIDC and gets short-lived credentials; the static keys
+      # are then not used. Without it, the static keys in the environment
+      # are used as they are.
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          aws-region: us-west-2
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          role-session-name: mina-provision-release-${{ github.run_id }}
+          aws-access-key-id: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ vars.AWS_ROLE_ARN == '' && secrets.AWS_SECRET_ACCESS_KEY || '' }}
+
       - name: Import the signing key
         env:
+          SIGN_KEY: ${{ secrets.DEBIAN_SIGN_KEY_ID }}
           GPG_PRIVATE_KEY: ${{ secrets.DEBIAN_SIGN_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.DEBIAN_SIGN_PASSPHRASE }}
         run: |
@@ -150,6 +188,8 @@ jobs:
           fi
 
       - name: Upload the package
+        env:
+          SIGN_KEY: ${{ secrets.DEBIAN_SIGN_KEY_ID }}
         run: |
           set -euo pipefail
           deb="$(ls dist/mina-provision_"${VERSION}"_"${ARCH}".deb)"

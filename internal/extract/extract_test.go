@@ -133,3 +133,93 @@ func TestTarGzNotGzip(t *testing.T) {
 		t.Fatalf("TarGz on non-gzip source = nil error, want error")
 	}
 }
+
+// The default --work-dir of `archive` is ".". A containment test on the
+// joined path rejected every entry for "." and "./", because Join drops the
+// leading "./" that the test then looked for.
+func TestTarGzIntoCurrentDirectory(t *testing.T) {
+	for _, dst := range []string{".", "./"} {
+		t.Run(dst, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "dump.tar.gz")
+			makeTarGz(t, src, map[string]string{"x.sql": "select 1;"})
+			chdir(t, dir)
+
+			files, err := TarGz(src, dst)
+			if err != nil {
+				t.Fatalf("TarGz(%q): %v", dst, err)
+			}
+			if len(files) != 1 {
+				t.Fatalf("wrote %v, want one file", files)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "x.sql")); err != nil {
+				t.Errorf("x.sql not written into the current directory: %v", err)
+			}
+		})
+	}
+}
+
+// Archives made with `tar -C dir -czf out.tar.gz .` name their entries "./x"
+// and start with a "./" directory entry. Both are inside the target.
+func TestTarGzAcceptsDotSlashEntries(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "dump.tar.gz")
+	dst := filepath.Join(dir, "out")
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "./", Mode: 0o755, Typeflag: tar.TypeDir}); err != nil {
+		t.Fatal(err)
+	}
+	body := "select 1;"
+	if err := tw.WriteHeader(&tar.Header{Name: "./x.sql", Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	tw.Close()
+	gz.Close()
+	if err := os.WriteFile(src, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := TarGz(src, dst)
+	if err != nil {
+		t.Fatalf("TarGz: %v", err)
+	}
+	if len(files) != 1 || files[0] != filepath.Join(dst, "x.sql") {
+		t.Errorf("wrote %v, want [%s]", files, filepath.Join(dst, "x.sql"))
+	}
+}
+
+func TestTarGzRejectsEscapingNames(t *testing.T) {
+	for _, name := range []string{"../x", "a/../../x", "/etc/x", ".."} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			src := filepath.Join(dir, "evil.tar.gz")
+			makeTarGz(t, src, map[string]string{name: "x"})
+			chdir(t, dir)
+
+			for _, dst := range []string{".", filepath.Join(dir, "out")} {
+				if files, err := TarGz(src, dst); err == nil {
+					t.Errorf("dst %q: accepted %q, wrote %v", dst, name, files)
+				}
+			}
+		})
+	}
+}
+
+// chdir changes the working directory for the rest of the test. t.Chdir
+// needs Go 1.24.
+func chdir(t *testing.T, dir string) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+}

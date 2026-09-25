@@ -8,12 +8,16 @@ package pg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // TuningSettings are the ALTER SYSTEM values applied before loading the
@@ -26,23 +30,48 @@ var TuningSettings = map[string]string{
 	"max_pred_locks_per_transaction": "5000",
 }
 
+// psqlArgs are the arguments every psql call starts with.
+//
+//   - -X skips ~/.psqlrc, which could change how a script runs.
+//   - ON_ERROR_STOP=1 makes psql stop at the first failing statement and exit
+//     non-zero. Without it psql carries on after an error and exits 0, so a
+//     failed restore or tuning looked like a success.
+//   - -d keeps a URI that starts with "-" from being read as an option.
+func psqlArgs(uri string) []string {
+	return []string{"-X", "-v", "ON_ERROR_STOP=1", "-d", uri}
+}
+
 // ApplyTuning runs ALTER SYSTEM for each TuningSettings entry.
 //
 // Note: ALTER SYSTEM writes to postgresql.auto.conf and requires a Postgres
 // restart to take effect. Most operators will restart the postgres container
 // after the database is provisioned; see README.md.
 func ApplyTuning(ctx context.Context, uri string) error {
-	args := []string{uri}
-	for k, v := range TuningSettings {
-		args = append(args, "-c", fmt.Sprintf("ALTER SYSTEM SET %s = %s", k, v))
+	// Sorted, so the statements run in the same order every time. With a map
+	// order a failure could be reported or not from one run to the next.
+	keys := make([]string, 0, len(TuningSettings))
+	for k := range TuningSettings {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	args := psqlArgs(uri)
+	for _, k := range keys {
+		args = append(args, "-c", fmt.Sprintf("ALTER SYSTEM SET %s = %s", k, TuningSettings[k]))
 	}
 	return run(ctx, "psql", args...)
 }
 
 // LoadSQLFile applies the contents of sqlPath to the database at uri.
+//
+// The first failing statement stops the load with an error. The load is not
+// one transaction: the published dumps start with CREATE DATABASE, which
+// cannot run inside one. A failure can therefore leave what was loaded before
+// it in place; the dumps create their own database, so a failure on a server
+// that already has it stops at that first statement and changes nothing.
 func LoadSQLFile(ctx context.Context, uri, sqlPath string) error {
 	slog.Info("loading sql dump", "path", sqlPath)
-	return run(ctx, "psql", uri, "-f", sqlPath)
+	return run(ctx, "psql", append(psqlArgs(uri), "-f", sqlPath)...)
 }
 
 // MaxBlockHeight returns the highest height present in the archive DB's
@@ -98,7 +127,7 @@ func parseHeights(out string) ([]int, error) {
 // (-tA) and returns its stdout. Stderr is streamed through so psql connection
 // errors stay visible.
 func query(ctx context.Context, uri, sql string) (string, error) {
-	cmd := exec.CommandContext(ctx, "psql", uri, "-tAc", sql)
+	cmd := exec.CommandContext(ctx, "psql", append(psqlArgs(uri), "-tA", "-c", sql)...)
 	cmd.Stderr = os.Stderr
 	slog.Debug("exec", "cmd", "psql", "sql", sql)
 	out, err := cmd.Output()
@@ -121,9 +150,8 @@ func run(ctx context.Context, name string, args ...string) error {
 
 // Presence describes what a target database already holds.
 type Presence struct {
-	// HasArchive is true only on positive evidence: the blocks table exists
-	// and can be read. A database that cannot be reached, or does not exist
-	// yet, leaves this false.
+	// HasArchive is true when the database exists and its blocks table
+	// holds at least one row.
 	HasArchive bool
 
 	// MaxHeight and Blocks describe what is there, for reporting. They are
@@ -132,43 +160,141 @@ type Presence struct {
 	Blocks    int
 }
 
-// DetectArchive reports whether uri already holds an archive.
+// ProbeRetryFor is how long DetectArchive keeps trying while the server
+// cannot be reached. A compose stack restarts PostgreSQL and the bootstrap
+// together, and the probe can run while PostgreSQL is still starting.
+var ProbeRetryFor = 60 * time.Second
+
+// DetectArchive reports whether the database db on the server at uri already
+// holds an archive. uri is used only to reach the server; see MaintenanceURI.
 //
-// Every failure is reported as "no archive found", never as an error, and the
-// reason is logged. The caller acts on this to decide whether to skip work, so
-// acting on anything less than positive evidence would be wrong in both
-// directions: a database that does not exist yet must be filled, and one that
-// cannot be reached must not be declared empty.
-func DetectArchive(ctx context.Context, uri string) Presence {
-	// to_regclass returns NULL rather than raising when the table is absent,
-	// so this one statement is safe against an empty or foreign database.
-	out, err := query(ctx, uri, "SELECT to_regclass('public.blocks') IS NOT NULL")
+// "No archive" is returned only on positive evidence: the database does not
+// exist, it has no blocks table, or the table has no rows. Anything that
+// stops the check -- a server that cannot be reached, is still starting, or
+// refuses to show the table -- is an error. Treating it as "no archive" would
+// let the caller restore a dump over a live archive it could not see.
+func DetectArchive(ctx context.Context, uri, db string) (Presence, error) {
+	admin, err := MaintenanceURI(uri, db)
 	if err != nil {
-		slog.Debug("could not inspect the target database; treating it as empty", "err", err)
-		return Presence{}
+		return Presence{}, err
 	}
-	if strings.TrimSpace(out) != "t" {
-		slog.Debug("no blocks table in the target database")
-		return Presence{}
+	out, err := queryRetry(ctx, admin,
+		fmt.Sprintf("SELECT count(*) FROM pg_database WHERE datname = %s", quoteLiteral(db)))
+	if err != nil {
+		return Presence{}, fmt.Errorf("check whether database %q exists: %w", db, err)
+	}
+	if strings.TrimSpace(out) == "0" {
+		slog.Debug("the target database does not exist", "database", db)
+		return Presence{}, nil
 	}
 
-	out, err = query(ctx, uri, "SELECT count(*), COALESCE(MAX(height), 0) FROM blocks")
+	target, err := WithDatabase(uri, db)
 	if err != nil {
-		slog.Debug("blocks table present but unreadable; treating it as empty", "err", err)
-		return Presence{}
+		return Presence{}, err
+	}
+	// to_regclass returns NULL rather than raising when the table is absent.
+	out, err = queryRetry(ctx, target, "SELECT to_regclass('public.blocks') IS NOT NULL")
+	if err != nil {
+		return Presence{}, fmt.Errorf("inspect database %q: %w", db, err)
+	}
+	if strings.TrimSpace(out) != "t" {
+		slog.Debug("no blocks table in the target database", "database", db)
+		return Presence{}, nil
+	}
+
+	out, err = queryRetry(ctx, target, "SELECT count(*), COALESCE(MAX(height), 0) FROM blocks")
+	if err != nil {
+		return Presence{}, fmt.Errorf("read the blocks table of database %q: %w", db, err)
 	}
 	count, height, err := parseCountAndHeight(out)
 	if err != nil {
-		slog.Debug("could not read the blocks table", "err", err)
-		return Presence{}
+		return Presence{}, err
 	}
 	if count == 0 {
 		// A schema with no rows is a database waiting to be filled, not an
 		// archive worth protecting.
-		slog.Debug("blocks table is present but empty")
-		return Presence{}
+		slog.Debug("blocks table is present but empty", "database", db)
+		return Presence{}, nil
 	}
-	return Presence{HasArchive: true, MaxHeight: height, Blocks: count}
+	return Presence{HasArchive: true, MaxHeight: height, Blocks: count}, nil
+}
+
+// queryRetry is query, tried again for up to ProbeRetryFor while psql reports
+// that it could not reach the server (exit status 2). Other failures, such as
+// a missing permission, are returned at once.
+func queryRetry(ctx context.Context, uri, sql string) (string, error) {
+	deadline := time.Now().Add(ProbeRetryFor)
+	wait := time.Second
+	for {
+		out, err := query(ctx, uri, sql)
+		var exit *exec.ExitError
+		if err == nil || !errors.As(err, &exit) || exit.ExitCode() != 2 || time.Now().Add(wait).After(deadline) {
+			return out, err
+		}
+		slog.Info("the server cannot be reached yet; trying again", "in", wait)
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(wait):
+		}
+		if wait < 8*time.Second {
+			wait *= 2
+		}
+	}
+}
+
+// MaintenanceDatabases are the databases that exist on every server and that
+// a --pg-uri can name only to reach the server.
+var MaintenanceDatabases = []string{"postgres", "template1"}
+
+// DatabaseOf returns the database a postgres:// URI names, or "" when it
+// names none.
+func DatabaseOf(uri string) (string, error) {
+	u, err := parseURI(uri)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimPrefix(u.Path, "/"), nil
+}
+
+// WithDatabase returns uri with its database replaced by db. Everything else,
+// including the query parameters, is kept.
+func WithDatabase(uri, db string) (string, error) {
+	u, err := parseURI(uri)
+	if err != nil {
+		return "", err
+	}
+	u.Path = "/" + db
+	u.RawPath = ""
+	return u.String(), nil
+}
+
+// MaintenanceURI returns a URI to reach the server at uri while db may not
+// exist yet. That is uri itself when it names another database, and uri with
+// the database "postgres" otherwise.
+func MaintenanceURI(uri, db string) (string, error) {
+	named, err := DatabaseOf(uri)
+	if err != nil {
+		return "", err
+	}
+	if named != "" && named != db {
+		return uri, nil
+	}
+	return WithDatabase(uri, "postgres")
+}
+
+func parseURI(uri string) (*url.URL, error) {
+	u, err := url.Parse(uri)
+	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
+		// Not echoed: a URI can hold a password.
+		return nil, fmt.Errorf("--pg-uri must be a postgres:// or postgresql:// URI")
+	}
+	return u, nil
+}
+
+// quoteLiteral quotes s as an SQL string literal.
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 // parseCountAndHeight reads the "count|height" pair psql -tA prints.

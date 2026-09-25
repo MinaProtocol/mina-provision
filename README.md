@@ -30,7 +30,10 @@ docker run --rm -v "$PWD/out:/out" ghcr.io/minaprotocol/mina-provision \
 ```
 
 `postgresql-client` is a recommendation, not a dependency. Only `archive`
-shells out to `psql`.
+shells out to `psql`. The published dumps use `\restrict`, which needs psql
+17.6 or later, or 16.10, 15.14, 14.19 or 13.22 on the older branches. `archive`
+checks this before it loads a dump. The container image has a psql that
+qualifies.
 
 ## Commands
 
@@ -41,44 +44,70 @@ tuning, and loads the SQL.
 
 | Flag | Meaning |
 |---|---|
-| `--pg-uri` | target database; required unless `--skip-pg` |
+| `--pg-uri` | the server to restore into; required unless `--skip-pg`. See [Where the dump goes](#where-the-dump-goes) |
 | `--date` | dump date, `YYYY-MM-DD`; defaults to today, UTC |
 | `--hour` | dump hour, `HHMM`; dumps are produced hourly |
-| `--work-dir` | where the download and the extracted SQL are written |
+| `--work-dir` | where the download and the extracted SQL are written; created if missing. Default: the current directory |
 | `--skip-pg` | download and extract only |
 | `--if-present` | what to do when the database already holds an archive: `import`, `skip`, `fail` |
 
 `ALTER SYSTEM` writes to `postgresql.auto.conf`, so PostgreSQL must be
 restarted for the tuning to take effect.
 
+#### Where the dump goes
+
+The published dumps are made with `pg_dump --create`. They start with
+`CREATE DATABASE archive` and `\connect archive`, so they restore into the
+database `archive` whatever database `--pg-uri` names. `--pg-uri` is then only
+the way to reach the server: `postgres://user:pw@host:5432/postgres` and
+`…/archive` both work, also on a new server where `archive` does not exist yet.
+A `--pg-uri` that names another database gets a warning.
+
+The provider's `database` setting says which database a dump creates. It is
+`archive` for the built-in providers. Before a dump is loaded, its header is
+checked against this setting, and a dump that creates a different database is
+refused. For a mirror of dumps made without `--create`, leave `database` out:
+those dumps restore into the database `--pg-uri` names.
+
+#### Errors stop the load
+
+The load stops at the first SQL error, and `archive` fails with psql's
+message. The load is not one transaction, because `CREATE DATABASE` cannot run
+inside one.
+
+A dump import does **not** replace an existing archive. Loaded onto a server
+that already has the `archive` database, it stops at `CREATE DATABASE` and
+changes nothing. To replace an archive, drop its database first, deliberately,
+outside this tool.
+
 #### Re-running against a database that already has an archive
 
-A dump import replaces whatever the target database holds. Re-running it
-against an archive that has since advanced moves that archive **backwards** and
-loses every block collected since the dump was taken. This is what happens when
-a one-shot bootstrap container is restarted — `docker compose down && up` — and
-it costs both the re-download and the newer data.
+A one-shot bootstrap container that is restarted -- `docker compose down && up`
+-- runs `archive` again against an archive that has since advanced. Use
+`--if-present` to decide what happens, before anything is downloaded:
 
 | `--if-present` | Behaviour |
 |---|---|
-| `import` | restore the dump regardless. The default, and how earlier versions behaved |
+| `import` | download and load regardless. The default. The load then fails on a server that already has the database |
 | `skip` | leave the database alone and exit successfully, downloading nothing |
 | `fail` | leave the database alone and exit with an error |
 
 ```
 $ mina-provision archive --network mainnet --pg-uri postgres://… --if-present=skip
-The target database already holds an archive: 548146 blocks, highest at 548146.
+Database "archive" already holds an archive: 548146 blocks, highest at 548146.
 Nothing was downloaded or changed (--if-present=skip).
 ```
 
-The check runs before the download, so `skip` avoids the gigabytes as well as
-the restore.
+The check looks at the database the dump restores into, not at the one
+`--pg-uri` names. It treats that database as empty only on **positive
+evidence**: the database does not exist, it has no `blocks` table, or the
+table has no rows. A first run on a new server therefore proceeds.
 
-`skip` and `fail` act only on **positive evidence**: a readable `blocks` table
-holding at least one row. A database that does not exist yet, one with no
-schema, one whose schema is empty, and a server that cannot be reached are all
-treated as empty. A first run is therefore never blocked, and an unreachable
-server never causes a live archive to be declared missing.
+When the check cannot be made -- the server cannot be reached, is still
+starting, or refuses to show the `blocks` table -- `archive` fails and
+downloads nothing. It keeps trying for up to a minute while the server cannot
+be reached, so a compose stack that restarts PostgreSQL and the bootstrap
+together sorts itself out.
 
 ### `blocks`
 
@@ -238,6 +267,7 @@ providers:
           base_url: https://artifacts.acme.internal/mina
           name: "dumps/mainnet-{date}.sql.tar.gz"
           checksum: sidecar          # expects <file>.sha256 beside it
+          database: archive          # the database the dumps create
         precomputed_blocks:
           backend: file
           path: /srv/mina/blocks

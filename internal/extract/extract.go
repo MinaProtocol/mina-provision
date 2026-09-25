@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // TarGz extracts the contents of src (a .tar.gz file) into dstDir and returns
@@ -52,10 +51,15 @@ func TarGzReader(src io.Reader, dstDir string) ([]string, error) {
 			return nil, fmt.Errorf("read tar: %w", err)
 		}
 
-		target := filepath.Join(dstDir, hdr.Name)
-		if !strings.HasPrefix(target, filepath.Clean(dstDir)+string(os.PathSeparator)) && target != filepath.Clean(dstDir) {
+		// Decided on the entry name alone, so it does not depend on how
+		// dstDir is spelt. A prefix test on the joined path rejected every
+		// entry when dstDir was "." or "./", because Join drops the "./".
+		// IsLocal refuses absolute names, ".." and names that climb out
+		// through ".." after cleaning.
+		if !filepath.IsLocal(hdr.Name) {
 			return nil, fmt.Errorf("tar entry escapes target dir: %s", hdr.Name)
 		}
+		target := filepath.Join(dstDir, hdr.Name)
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:

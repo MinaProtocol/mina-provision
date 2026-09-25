@@ -143,6 +143,7 @@ providers:
           base_url: https://artifacts.acme.internal/mina
           name: "dumps/mainnet-{date}_{hour}.sql.tar.gz"
           checksum: sidecar
+          database: archive
         precomputed_blocks:
           backend: http
           base_url: https://artifacts.acme.internal/mina
@@ -151,6 +152,16 @@ providers:
 ```
 
 `archive` needs no index: a date and an hour name the file completely.
+
+`database` is the database the dumps create. Dumps made with
+`pg_dump --create`, which include the Foundation's, start with
+`CREATE DATABASE archive` and restore into `archive` whatever database
+`--pg-uri` names. `archive` checks each dump's header against this setting
+before it loads the dump, and before the download it checks this database for
+an existing archive (`--if-present`). A mirror of the Foundation's dumps must
+say `database: archive`: an artifact in a user file replaces the built-in one
+completely, so it does not inherit the setting. Leave it out only for dumps
+made without `--create`; those restore into the database `--pg-uri` names.
 
 `blocks` does need one. A block's name contains its state hash, which is not
 known from the height, so a height narrows the name only to a prefix that then

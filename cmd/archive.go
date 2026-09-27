@@ -19,13 +19,19 @@ import (
 )
 
 var (
-	archivePgURI     string
-	archiveDate      string
-	archiveHour      string
-	archiveWorkDir   string
-	archiveSkipPg    bool
-	archiveIfPresent string
+	archivePgURI           string
+	archiveDate            string
+	archiveHour            string
+	archiveWorkDir         string
+	archiveSkipPg          bool
+	archiveIfPresent       string
+	archiveMaxExtractBytes int64
 )
+
+// defaultMaxExtractBytes is the default of --max-extract-bytes. It is well
+// above the size of a mainnet dump, and is there to stop an archive that
+// expands without limit from filling the disk.
+const defaultMaxExtractBytes = 200 << 30 // 200 GiB
 
 // What to do when the target database already holds an archive.
 const (
@@ -92,6 +98,8 @@ func init() {
 	archiveCmd.Flags().BoolVar(&archiveSkipPg, "skip-pg", false, "Download and extract only; skip the psql restore step.")
 	archiveCmd.Flags().StringVar(&archiveIfPresent, "if-present", ifPresentImport,
 		"What to do when the database already holds an archive: import (default), skip, or fail.")
+	archiveCmd.Flags().Int64Var(&archiveMaxExtractBytes, "max-extract-bytes", defaultMaxExtractBytes,
+		"Most bytes the extracted dump may hold. Extraction stops with an error above it.")
 }
 
 func runArchive(_ *cobra.Command, _ []string) error {
@@ -105,6 +113,9 @@ func runArchive(_ *cobra.Command, _ []string) error {
 	}
 	if err := validateHour(archiveHour); err != nil {
 		return err
+	}
+	if archiveMaxExtractBytes <= 0 {
+		return fmt.Errorf("--max-extract-bytes must be positive, got %d", archiveMaxExtractBytes)
 	}
 
 	ctx := context.Background()
@@ -176,21 +187,21 @@ func runArchive(_ *cobra.Command, _ []string) error {
 	}
 
 	slog.Info("extracting", "src", dst, "dst", archiveWorkDir)
-	files, err := extract.TarGz(dst, archiveWorkDir)
+	// Only the .sql is used. Other entries are not written, so an archive
+	// cannot place a file in --work-dir that a later run would read, such as
+	// a provider configuration.
+	files, err := extract.TarGz(dst, archiveWorkDir, extract.Options{
+		MaxBytes: archiveMaxExtractBytes,
+		Keep:     isSQL,
+	})
 	if err != nil {
 		return fmt.Errorf("extract: %w", err)
 	}
 
-	sqlPath := ""
-	for _, f := range files {
-		if strings.HasSuffix(f, ".sql") {
-			sqlPath = f
-			break
-		}
-	}
-	if sqlPath == "" {
+	if len(files) == 0 {
 		return fmt.Errorf("no .sql file found in %s", dst)
 	}
+	sqlPath := files[0]
 	slog.Info("found sql dump", "path", sqlPath)
 
 	if archiveSkipPg {
@@ -273,6 +284,11 @@ func checkDump(ctx context.Context, sqlPath, wantDB string) error {
 		}
 	}
 	return nil
+}
+
+// isSQL selects the tar entries that archive extracts.
+func isSQL(name string) bool {
+	return strings.HasSuffix(name, ".sql")
 }
 
 // validateHour checks that an --hour value is a 4-character HHMM string.

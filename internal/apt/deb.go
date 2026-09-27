@@ -17,6 +17,12 @@ const arMagic = "!<arch>\n"
 // name[16] mtime[12] uid[6] gid[6] mode[8] size[10] magic[2].
 const arHeaderSize = 60
 
+// maxExpansion bounds the extracted size of a package as a multiple of the
+// size of the .deb. The packages carry JSON: the one in testdata expands to
+// about 1.5 times its size. The factor leaves a wide margin for JSON that
+// compresses better, and still stops a small package from filling the disk.
+const maxExpansion = 100
+
 // ExtractData unpacks the data member of a .deb into dstDir and returns the
 // files written.
 //
@@ -31,6 +37,13 @@ func ExtractData(debPath, dstDir string) ([]string, error) {
 		return nil, err
 	}
 	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	// The download is checked against the Size in the repository index, so
+	// the size of the file is the size of the package.
+	limit := extract.Options{MaxBytes: maxExpansion * st.Size()}
 
 	magic := make([]byte, len(arMagic))
 	if _, err := io.ReadFull(f, magic); err != nil {
@@ -56,7 +69,7 @@ func ExtractData(debPath, dstDir string) ([]string, error) {
 				return nil, fmt.Errorf("%s: data member is %q, but only gzip is expected "+
 					"(Mina packages are built with dpkg-deb -Zgzip)", debPath, name)
 			}
-			return extract.TarGzReader(io.LimitReader(f, size), dstDir)
+			return extract.TarGzReader(io.LimitReader(f, size), dstDir, limit)
 		}
 
 		// Skip this member, including the padding byte that keeps members

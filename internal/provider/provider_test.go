@@ -31,6 +31,31 @@ func TestBuiltInDefaultsAreValid(t *testing.T) {
 	}
 }
 
+// A mina-provision.yaml in the current directory is not read. Anyone who can
+// write to that directory could otherwise redirect every endpoint.
+func TestLoadIgnoresTheCurrentDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mina-provision.yaml"), []byte("version: 1\ndefault_provider: evil\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	t.Setenv("MINA_PROVISION_CONFIG", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	cfg, path, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if path == "mina-provision.yaml" || cfg.DefaultProvider == "evil" {
+		t.Fatalf("Load read mina-provision.yaml from the current directory (path %q)", path)
+	}
+	for _, p := range SearchPaths() {
+		if !filepath.IsAbs(p) {
+			t.Errorf("search path %q depends on the current directory", p)
+		}
+	}
+}
+
 // A user file adds a provider without restating the defaults, and the defaults
 // stay reachable. This is the property that lets a mirror be added without the
 // o1labs entries going stale.

@@ -28,13 +28,21 @@ func (f *fileSource) Get(ctx context.Context, name, dst string) error {
 }
 
 func (f *fileSource) getRaw(_ context.Context, name, dst string) error {
-	src := filepath.Join(f.artifact.Path, filepath.FromSlash(name))
-	if err := ensureInside(f.artifact.Path, src); err != nil {
+	// A crafted object name must not read outside the configured directory.
+	// The name is checked here; a symlink in the directory that points out
+	// of it is refused by the root when the file is opened.
+	rel := filepath.FromSlash(name)
+	if !filepath.IsLocal(rel) {
+		return fmt.Errorf("object name escapes %s", f.artifact.Path)
+	}
+	root, err := os.OpenRoot(f.artifact.Path)
+	if err != nil {
 		return err
 	}
-	slog.Info("copying", "src", src, "dst", dst)
+	defer root.Close()
+	slog.Info("copying", "src", filepath.Join(f.artifact.Path, rel), "dst", dst)
 
-	in, err := os.Open(src)
+	in, err := root.Open(rel)
 	if err != nil {
 		return err
 	}
@@ -51,23 +59,30 @@ func (f *fileSource) getRaw(_ context.Context, name, dst string) error {
 }
 
 func (f *fileSource) List(_ context.Context, prefix string) ([]string, error) {
-	root := f.artifact.Path
+	root, err := os.OpenRoot(f.artifact.Path)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
 	var names []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err = fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() {
+		if d.IsDir() || !strings.HasPrefix(path, prefix) {
 			return nil
 		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
+		// A symlink is listed only when Get can read it: it must point to a
+		// regular file inside the directory.
+		if d.Type()&fs.ModeSymlink != 0 {
+			info, err := root.Stat(path)
+			if err != nil || !info.Mode().IsRegular() {
+				slog.Warn("skipping symlink that does not point to a file inside the directory",
+					"path", filepath.Join(f.artifact.Path, path), "err", err)
+				return nil
+			}
 		}
-		rel = filepath.ToSlash(rel)
-		if strings.HasPrefix(rel, prefix) {
-			names = append(names, rel)
-		}
+		names = append(names, path)
 		return nil
 	})
 	if err != nil {
@@ -77,20 +92,3 @@ func (f *fileSource) List(_ context.Context, prefix string) ([]string, error) {
 }
 
 func (f *fileSource) Describe() string { return f.artifact.Path }
-
-// ensureInside refuses a name that would read outside the configured
-// directory, so a crafted object name cannot reach the rest of the file system.
-func ensureInside(root, path string) error {
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return err
-	}
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	if absPath != absRoot && !strings.HasPrefix(absPath, absRoot+string(os.PathSeparator)) {
-		return fmt.Errorf("object name escapes %s", root)
-	}
-	return nil
-}

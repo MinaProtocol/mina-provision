@@ -64,9 +64,11 @@ mina-provision blocks --provider-config ./mina-provision.yaml \
 The file is found without the flag in any of these places, in order:
 
 1. `MINA_PROVISION_CONFIG`
-2. `./mina-provision.yaml`
-3. `$XDG_CONFIG_HOME/mina-provision/config.yaml`
-4. `/etc/mina-provision/config.yaml`
+2. `$XDG_CONFIG_HOME/mina-provision/config.yaml`
+3. `/etc/mina-provision/config.yaml`
+
+The current directory is not searched. A `mina-provision.yaml` there is read
+only when `--provider-config` or `MINA_PROVISION_CONFIG` names it.
 
 ### It merges, it does not replace
 
@@ -128,7 +130,9 @@ providers:
 ```
 
 A name is not allowed to reach outside `path`, so an object name containing
-`../` is refused rather than followed.
+`../` is refused rather than followed. A symlink in the directory is followed
+only when it points to a file inside `path`. A symlink that points outside is
+not listed and cannot be read. `path: /` is allowed.
 
 ### `http` — a mirror, and why it needs an index
 

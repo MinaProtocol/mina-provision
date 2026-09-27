@@ -40,8 +40,13 @@ The default provider serves this as a Debian package, and that is deliberate.
 The daemon auto-loads /var/lib/coda/config_<hash>.json, where the hash is
 derived from the commit at build time and is not the hash in the package
 version. The package is the only published artifact carrying both the right
-content and the right file name, and the repository index publishes a SHA256
-for it, which is always checked.
+content and the right file name.
+
+The repository index publishes a SHA256 for the package, and it is always
+checked. This proves that the package matches the index. It does not prove
+that the index is genuine: the index is not checked against a signed
+InRelease file, so it is only as trustworthy as the https connection and the
+repository host that serve it.
 
 The same JSON exists in the mina source tree. "--provider github --ref <tag>"
 fetches it from there, but it arrives under the source-tree name, so the
@@ -63,7 +68,7 @@ func init() {
 	configCmd.Flags().StringVar(&configRef, "ref", "compatible", "Git ref, for a provider that serves a source tree.")
 }
 
-func runConfig(_ *cobra.Command, _ []string) error {
+func runConfig(cmd *cobra.Command, _ []string) error {
 	art, err := resolveArtifact(provider.KindDaemonConfig)
 	if err != nil {
 		return err
@@ -71,7 +76,7 @@ func runConfig(_ *cobra.Command, _ []string) error {
 	if err := os.MkdirAll(configOut, 0o755); err != nil {
 		return err
 	}
-	ctx := context.Background()
+	ctx := commandContext(cmd)
 
 	if art.Backend == provider.BackendAPT {
 		return configFromPackage(ctx, art)
@@ -88,6 +93,13 @@ func configFromPackage(ctx context.Context, art *provider.Artifact) error {
 		Codename:  firstNonEmpty(configCodename, art.Codename),
 		Package:   firstNonEmpty(configPackage, art.Package),
 		Version:   configVersion,
+	}
+	// The provider's repository was checked when the configuration was
+	// loaded. A --repository override has to pass the same check.
+	if configRepo != "" {
+		if err := provider.CheckURL("--repository", configRepo, art.Insecure); err != nil {
+			return err
+		}
 	}
 	pkg, err := apt.Resolve(ctx, q)
 	if err != nil {

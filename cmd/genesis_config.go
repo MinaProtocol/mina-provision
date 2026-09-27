@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -39,7 +38,7 @@ func init() {
 		"Directory to write the configuration into.")
 }
 
-func runGenesisConfig(_ *cobra.Command, _ []string) error {
+func runGenesisConfig(cmd *cobra.Command, _ []string) error {
 	art, err := resolveArtifact(provider.KindGenesisConfig)
 	if err != nil {
 		return err
@@ -57,7 +56,7 @@ func runGenesisConfig(_ *cobra.Command, _ []string) error {
 	}
 	dst := filepath.Join(genesisConfigOut, filepath.Base(name))
 
-	if err := src.Get(context.Background(), name, dst); err != nil {
+	if err := src.Get(commandContext(cmd), name, dst); err != nil {
 		return err
 	}
 

@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -129,6 +132,25 @@ func resolveArtifact(kind provider.Kind) (*provider.Artifact, error) {
 	return cfg.Resolve(providerName, network, kind)
 }
 
+// Execute runs the command line. SIGINT and SIGTERM cancel the context every
+// command runs on, so Ctrl-C, `docker stop` or a pod termination stops the
+// downloads and psql, and the run exits non-zero. A second signal after the
+// first uses the default action and ends the process at once.
 func Execute() error {
-	return rootCmd.Execute()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	return rootCmd.ExecuteContext(ctx)
+}
+
+// commandContext returns the context a command runs on. A command that is
+// called directly, as the tests do, runs on context.Background.
+func commandContext(cmd *cobra.Command) context.Context {
+	if cmd != nil && cmd.Context() != nil {
+		return cmd.Context()
+	}
+	return context.Background()
 }

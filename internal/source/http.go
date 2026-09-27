@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MinaProtocol/mina-provision/internal/httpclient"
 	"github.com/MinaProtocol/mina-provision/internal/provider"
 )
 
@@ -73,7 +74,7 @@ func get(ctx context.Context, url string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpclient.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("get %s: %w", url, err)
 	}

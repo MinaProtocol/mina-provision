@@ -193,7 +193,50 @@ daemon_config:
 ```
 
 Any of these can be overridden per run with `--repository`, `--codename`,
-`--component`, `--package` and `--version`.
+`--component`, `--package` and `--version`. A `--repository` value has to pass
+the same https check as the configured one.
+
+## Transport
+
+The `http` and `apt` backends trust what the endpoint serves. With `checksum:
+sidecar` the digest comes from the same host as the object, and with
+`checksum: index` the digest comes from an index that is not signed. So the
+connection is what protects them, and it must be https.
+
+- `base_url`, `index` and `repository` must be `https://` URLs. Any other
+  value is refused when the configuration is loaded.
+- Plain `http://` is accepted in two cases:
+  - the host is a loopback address: `localhost`, `127.0.0.0/8` or `::1`. No
+    network path exists to such a host, which is what tests and a local
+    mirror use.
+  - the artifact sets `insecure: true`. This accepts plain http to any host.
+    It is a field and not a default so that the decision is written down
+    where a reviewer can see it, as `checksum: none` is.
+
+```yaml
+precomputed_blocks:
+  backend: http
+  base_url: http://mirror.lan/mina   # plain http on a trusted network
+  index: http://mirror.lan/mina/blocks.txt
+  name: "mainnet-{height}-{state_hash}.json"
+  insecure: true
+```
+
+`insecure` is only accepted on the `http` and `apt` backends. The `gcs`
+backend always uses https, and `file` does not use a network.
+
+Every HTTP request also has these limits:
+
+| Limit | Value |
+|---|---|
+| wait for the response headers | 30 s |
+| TLS handshake | 10 s |
+| one read of the body that receives no data | 60 s |
+| redirects followed | 10 |
+
+There is no limit on the total time of a download, because an archive dump is
+gigabytes. A redirect from https to plain http is refused, with or without
+`insecure`.
 
 ## Verification
 
@@ -206,6 +249,12 @@ passes quietly.
 | `index` | the digest comes from the repository index | `apt` only |
 | `sidecar` | the digest comes from `<file>.sha256` beside the object | `gcs`, `http`, `file` |
 | `none` | only the transfer itself is checked | all |
+
+`checksum: index` proves that the package matches the index. It does not prove
+that the index is genuine: the index is not checked against a signed
+`InRelease` or `Release.gpg` file. The index is therefore as trustworthy as the
+https connection and the repository host, and no more. It does not protect
+against a compromised mirror.
 
 A sidecar is a file next to the object holding its hex SHA256. Both forms
 `sha256sum` produces are accepted:
@@ -253,6 +302,7 @@ Common messages and what they mean:
 | `backend gcs needs a bucket` | a required field for that backend is missing |
 | `checksum: index needs an index to read` | `index` is only meaningful for `apt` |
 | `provider serves ... over http with no index` | `blocks` from an `http` provider without `index` |
+| `base_url "http://..." is plain http; use https, ...` | a non-https endpoint. See [Transport](#transport) |
 
 ## A built-in provider
 
@@ -288,6 +338,7 @@ What a reviewer will look for:
 
 - The endpoint is public, or the pull request says who can reach it.
 - `checksum` is `none` only when the publisher genuinely states no digest.
+- Every URL is https. A built-in entry never sets `insecure`.
 - An `http` entry that serves blocks has an `index`.
 - The name template matches what the publisher really produces, with a real
   example in the pull request description.

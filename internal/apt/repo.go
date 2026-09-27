@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/MinaProtocol/mina-provision/internal/atomicfile"
+	"github.com/MinaProtocol/mina-provision/internal/httpclient"
 )
 
 // Package is one stanza of a Packages index, reduced to the fields needed to
@@ -123,7 +124,9 @@ func Resolve(ctx context.Context, q Query) (Package, error) {
 // The SHA256 published in the index is always checked. A repository fetch that
 // is not verified is only transport security, and the point of preferring the
 // package over an ad-hoc download is that the publisher states what the bytes
-// should be.
+// should be. The index is not checked against a signed InRelease, so the
+// check proves that the package matches the index, not that the index is
+// genuine.
 func Download(ctx context.Context, baseURL string, p Package, dir string) (string, error) {
 	if p.SHA256 == "" {
 		return "", fmt.Errorf("%s %s: index publishes no SHA256; refusing to use an unverifiable package",
@@ -136,7 +139,7 @@ func Download(ctx context.Context, baseURL string, p Package, dir string) (strin
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpclient.Client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("get %s: %w", url, err)
 	}
@@ -180,7 +183,7 @@ func fetchIndex(ctx context.Context, base string) (io.ReadCloser, error) {
 		if err != nil {
 			return nil, err
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpclient.Client.Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -284,7 +287,7 @@ func Components(ctx context.Context, baseURL, codename string) ([]string, error)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpclient.Client.Do(req)
 	if err != nil {
 		return nil, err
 	}

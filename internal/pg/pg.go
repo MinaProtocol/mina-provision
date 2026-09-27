@@ -30,6 +30,10 @@ var TuningSettings = map[string]string{
 	"max_pred_locks_per_transaction": "5000",
 }
 
+// cancelGrace is how long psql has to stop after it is interrupted, before it
+// is killed.
+const cancelGrace = 10 * time.Second
+
 // psqlCmd builds a psql command that connects to uri and then takes args.
 // Every psql call goes through it.
 //
@@ -52,6 +56,11 @@ func psqlCmd(ctx context.Context, uri string, args ...string) (*exec.Cmd, error)
 		return nil, err
 	}
 	cmd := exec.CommandContext(ctx, "psql", append([]string{"-X", "-v", "ON_ERROR_STOP=1", "-d", u.String()}, args...)...)
+	// The default cancellation kills psql, which leaves the running statement
+	// on the server. SIGINT makes psql send a cancel request for that
+	// statement, and ON_ERROR_STOP then makes it exit non-zero.
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = cancelGrace
 	if pw != "" {
 		// A later entry wins over a PGPASSWORD already in the environment.
 		cmd.Env = append(os.Environ(), "PGPASSWORD="+pw)

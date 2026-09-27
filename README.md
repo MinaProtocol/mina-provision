@@ -15,18 +15,54 @@ mina-provision genesis-config  --network mainnet                      # the fork
 
 ```bash
 # Debian and Ubuntu, from the signed apt repository
-sudo wget -q https://stable.apt.packages.minaprotocol.com/repo-signing-key.gpg \
-  -O /etc/apt/trusted.gpg.d/minaprotocol.gpg
-echo "deb https://stable.apt.packages.minaprotocol.com $(lsb_release -cs) stable" \
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo wget -qO /etc/apt/keyrings/minaprotocol.gpg \
+  https://stable.apt.packages.minaprotocol.com/repo-signing-key.gpg
+gpg --show-keys /etc/apt/keyrings/minaprotocol.gpg   # compare the fingerprint, see below
+echo "deb [signed-by=/etc/apt/keyrings/minaprotocol.gpg] https://stable.apt.packages.minaprotocol.com $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
   | sudo tee /etc/apt/sources.list.d/mina.list
 sudo apt-get update && sudo apt-get install mina-provision
 
-# or a single .deb from a release
+# or a single .deb from a release, see "Checking a release download" below
 sudo dpkg -i mina-provision_<version>_amd64.deb
 
 # or a container
-docker run --rm -v "$PWD/out:/out" ghcr.io/minaprotocol/mina-provision \
-  daemon-config --network mainnet --out /out
+mkdir -p out
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/out:/out" \
+  ghcr.io/minaprotocol/mina-provision daemon-config --network mainnet --out /out
+```
+
+The repository key must have this fingerprint. Do not continue if
+`gpg --show-keys` shows a different one:
+
+```
+386E 9DAC 3787 26A4 8ED5  CE56 ADB3 0D9A CE02 F414
+```
+
+`signed-by` makes apt trust the key for this one source only. A key in
+`/etc/apt/trusted.gpg.d/` is trusted for every configured source: an index
+signed with it would be accepted from any of them, also the Debian or Ubuntu
+ones.
+
+`arm64` packages exist only for bookworm and noble. The bullseye, focal and
+jammy distributions of the repository do not declare `arm64`, so on an `arm64`
+host with one of them `apt-get install` fails with "Unable to locate package".
+Use the `arm64` binary from a release, or the container, there.
+
+The container runs as the unprivileged user `provision`, uid and gid `10001`,
+in the working directory `/work`. Without `--user`, files written to a mounted
+directory belong to uid `10001` on the host, and the directory must be
+writable by that uid. With `--user "$(id -u):$(id -g)"` they belong to you.
+
+### Checking a release download
+
+Each GitHub Release has a `SHA256SUMS` file and a build provenance attestation
+for every file it has. The attestation is a signed statement that the file was
+built by this repository's `Release` workflow, from the tagged commit.
+
+```bash
+sha256sum -c --ignore-missing SHA256SUMS
+gh attestation verify mina-provision_<version>_amd64.deb -R MinaProtocol/mina-provision
 ```
 
 `postgresql-client` is a recommendation, not a dependency. Only `archive`
@@ -363,7 +399,8 @@ Pushing a `vX.Y.Z` tag builds a static binary for `amd64` and `arm64`, packages
 each as a `.deb`, attaches them to a GitHub Release, and publishes the signed
 packages to the `stable` component of `stable.apt.packages.minaprotocol.com`.
 `amd64` goes to bullseye, focal, jammy, bookworm and noble; `arm64` goes to
-bookworm and noble, the two distributions that declare it.
+bookworm and noble, the two distributions that declare it. The release also
+has a `SHA256SUMS` file and a provenance attestation for its files.
 Publication is described in [`docs/releasing.md`](docs/releasing.md).
 
 ## Planned

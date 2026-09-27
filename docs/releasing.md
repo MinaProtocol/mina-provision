@@ -13,14 +13,17 @@ git push origin v0.1.0
 
 | Job | Output |
 |---|---|
-| `release` | static binaries for `amd64` and `arm64`, one `.deb` each, a GitHub Release with both |
+| `release` | static binaries for `amd64` and `arm64`, one `.deb` each, `SHA256SUMS`, a provenance attestation, a GitHub Release with all of them |
 | `publish-apt` | the same packages in `stable.apt.packages.minaprotocol.com`, component `stable` |
 
 The version is the tag with the leading `v` removed. It is what the `.deb`
 carries and what the verification step looks for.
 
 The `Package` workflow publishes the container image to GHCR in parallel, from
-the same tag.
+the same tag. Its `version-match` job then waits for the `amd64` `.deb` in the
+GitHub Release, and fails unless the image and the package report the same
+`--version`. The `docker build` CI job does the same check on every pull
+request, against a package built in the same run.
 
 ## What is published where
 
@@ -180,6 +183,12 @@ versions are kept.
 verdict on its own, so the job lists the distribution afterwards and fails
 unless the new version appears in it.
 
+**Checksums and provenance.** `SHA256SUMS` lists the binaries and the
+packages. `actions/attest-build-provenance` signs a statement, through GitHub
+OIDC, that each file in `dist/` was built by this workflow at the tagged
+commit. Only the `release` job has the `id-token: write` and
+`attestations: write` permissions this needs.
+
 **The CDN cache is invalidated.** The signed repositories are served through
 CloudFront. Without an invalidation, apt clients keep reading the previous
 index and `Release` signature for as long as the edge caches hold them, and the
@@ -195,14 +204,33 @@ deb-s3 list --bucket stable.apt.packages.minaprotocol.com --s3-region us-west-2 
 On a target host:
 
 ```bash
-sudo wget -q https://stable.apt.packages.minaprotocol.com/repo-signing-key.gpg \
-  -O /etc/apt/trusted.gpg.d/minaprotocol.gpg
-echo "deb https://stable.apt.packages.minaprotocol.com $(lsb_release -cs) stable" \
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo wget -qO /etc/apt/keyrings/minaprotocol.gpg \
+  https://stable.apt.packages.minaprotocol.com/repo-signing-key.gpg
+gpg --show-keys /etc/apt/keyrings/minaprotocol.gpg
+echo "deb [signed-by=/etc/apt/keyrings/minaprotocol.gpg] https://stable.apt.packages.minaprotocol.com $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
   | sudo tee /etc/apt/sources.list.d/mina.list
 sudo apt-get update
 apt-cache policy mina-provision
 ```
 
-The signing key is the one that signs every Mina repository, key id
-`386E9DAC378726A48ED5CE56ADB30D9ACE02F414`. It is published at
-`/repo-signing-key.gpg` on each repository host; `key.asc` does not exist.
+The signing key is the one that signs every Mina repository, fingerprint
+`386E 9DAC 3787 26A4 8ED5  CE56 ADB3 0D9A CE02 F414`. `gpg --show-keys` must
+show this fingerprint. The key is published at `/repo-signing-key.gpg` on each
+repository host; `key.asc` does not exist.
+
+`signed-by` makes apt trust the key for this one source only. A key in
+`/etc/apt/trusted.gpg.d/` is trusted for every configured source.
+
+The release assets, in a directory that has `SHA256SUMS` and the downloaded
+files:
+
+```bash
+gh release download v0.1.0 -R MinaProtocol/mina-provision
+sha256sum -c SHA256SUMS
+gh attestation verify mina-provision-linux-amd64 -R MinaProtocol/mina-provision
+```
+
+`sha256sum -c --ignore-missing SHA256SUMS` checks only the files that were
+downloaded. `gh attestation verify` accepts any of the files in the release,
+`SHA256SUMS` included.

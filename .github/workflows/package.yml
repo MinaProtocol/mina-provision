@@ -27,6 +27,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -57,7 +60,8 @@ jobs:
             type=semver,pattern={{version}}
             type=sha,format=long
 
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -65,3 +69,54 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: VERSION=${{ steps.version.outputs.version }}
+
+  version-match:
+    name: image and .deb versions agree
+    # A release tag only. The .deb comes from the GitHub Release that
+    # release.yml makes from the same tag, so this compares the two published
+    # artefacts, not two local builds. The published 0.0.3 image reported
+    # `v0.0.3` while the 0.0.3 package reported `0.0.3`; the CI check covers
+    # the build, and this covers the version each workflow derives from the
+    # tag.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: docker
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      VERSION: ${{ needs.docker.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download the amd64 package from the release
+        # release.yml runs in parallel and can finish after this workflow, so
+        # the asset is polled for, for up to 20 minutes.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 40); do
+            if gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+                 --pattern "mina-provision_${VERSION}_amd64.deb" --dir dist --clobber; then
+              exit 0
+            fi
+            echo "attempt $attempt: the release asset is not there yet"
+            sleep 30
+          done
+          echo "mina-provision_${VERSION}_amd64.deb is not attached to release $GITHUB_REF_NAME" >&2
+          exit 1
+
+      - name: Image and package report the same version
+        # By digest, so the image checked is the one this run pushed. The
+        # owner name has capitals, which an image reference must not have.
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.docker.outputs.digest }}
+        run: |
+          .github/scripts/check-version-match.sh "${IMAGE,,}" "dist/mina-provision_${VERSION}_amd64.deb"

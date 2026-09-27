@@ -20,9 +20,10 @@ updates:
       gomod:
         patterns: [ "*" ]
 
-  # The GO_IMAGE and BASE_IMAGE build arguments in the Dockerfile. A GO_IMAGE
-  # bump must come with the same toolchain line in go.mod; the "Toolchain
-  # versions agree" CI check fails until both match.
+  # The two FROM lines in the Dockerfile. They are pinned by digest, and
+  # Dependabot updates the tag and the digest together. A golang bump must come
+  # with the same toolchain line in go.mod; the "Toolchain versions agree" CI
+  # check fails until both match.
   - package-ecosystem: docker
     directory: /
     schedule:

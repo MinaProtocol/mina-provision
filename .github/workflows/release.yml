@@ -22,6 +22,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # For the provenance attestation: the OIDC token proves which workflow
+      # run built the files, and the attestation is stored in this repository.
+      # Only this job gets them.
+      id-token: write
+      attestations: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -50,6 +55,22 @@ jobs:
           done
           ls -l dist
 
+      - name: Checksums
+        # The names are relative, so `sha256sum -c SHA256SUMS` works in the
+        # directory the release assets are downloaded into.
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum mina-provision-linux-* mina-provision_*.deb > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Provenance attestation
+        # A signed statement that these files were built by this workflow, at
+        # this commit. `gh attestation verify` checks it.
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: packages
@@ -62,6 +83,7 @@ jobs:
           files: |
             dist/mina-provision-linux-*
             dist/*.deb
+            dist/SHA256SUMS
 
   publish-apt:
     name: publish ${{ matrix.codename }}/${{ matrix.arch }}

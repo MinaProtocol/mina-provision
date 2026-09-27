@@ -21,33 +21,23 @@ type fileSource struct {
 }
 
 func (f *fileSource) Get(ctx context.Context, name, dst string) error {
-	if err := f.getRaw(ctx, name, dst); err != nil {
-		return err
-	}
-	return verifySidecar(ctx, f, f.artifact, name, dst)
+	return getVerified(ctx, f, f.artifact, name, dst)
 }
 
-func (f *fileSource) getRaw(_ context.Context, name, dst string) error {
+func (f *fileSource) getRaw(_ context.Context, name string, w io.Writer) error {
 	src := filepath.Join(f.artifact.Path, filepath.FromSlash(name))
 	if err := ensureInside(f.artifact.Path, src); err != nil {
 		return err
 	}
-	slog.Info("copying", "src", src, "dst", dst)
+	slog.Info("copying", "src", src)
 
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Close()
+	_, err = io.Copy(w, in)
+	return err
 }
 
 func (f *fileSource) List(_ context.Context, prefix string) ([]string, error) {

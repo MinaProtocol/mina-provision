@@ -28,6 +28,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/MinaProtocol/mina-provision/internal/atomicfile"
 )
 
 // Package is one stanza of a Packages index, reduced to the fields needed to
@@ -143,25 +145,28 @@ func Download(ctx context.Context, baseURL string, p Package, dir string) (strin
 		return "", fmt.Errorf("get %s: %s", url, resp.Status)
 	}
 
+	// The package is placed at dst only when it is complete and its digest
+	// matches, so a failed download leaves nothing that could be unpacked.
 	dst := filepath.Join(dir, filepath.Base(p.Filename))
-	f, err := os.Create(dst)
+	var got string
+	err = atomicfile.Write(dst, func(f *os.File) error {
+		sum := sha256.New()
+		written, err := io.Copy(io.MultiWriter(f, sum), resp.Body)
+		if err != nil {
+			return fmt.Errorf("download %s: %w", url, err)
+		}
+		if p.Size > 0 && written != p.Size {
+			return fmt.Errorf("%s: expected %d bytes, got %d", url, p.Size, written)
+		}
+		got = hex.EncodeToString(sum.Sum(nil))
+		if !strings.EqualFold(got, p.SHA256) {
+			return fmt.Errorf("%s: checksum mismatch (index says %s, download is %s)",
+				url, p.SHA256, got)
+		}
+		return nil
+	})
 	if err != nil {
 		return "", err
-	}
-	defer f.Close()
-
-	sum := sha256.New()
-	written, err := io.Copy(io.MultiWriter(f, sum), resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("download %s: %w", url, err)
-	}
-	if p.Size > 0 && written != p.Size {
-		return "", fmt.Errorf("%s: expected %d bytes, got %d", url, p.Size, written)
-	}
-	got := hex.EncodeToString(sum.Sum(nil))
-	if !strings.EqualFold(got, p.SHA256) {
-		return "", fmt.Errorf("%s: checksum mismatch (index says %s, download is %s)",
-			url, p.SHA256, got)
 	}
 	slog.Info("package verified", "path", dst, "sha256", got)
 	return dst, nil

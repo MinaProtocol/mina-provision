@@ -94,7 +94,7 @@ func init() {
 		"What to do when the database already holds an archive: import (default), skip, or fail.")
 }
 
-func runArchive(_ *cobra.Command, _ []string) error {
+func runArchive(cmd *cobra.Command, _ []string) error {
 	if !archiveSkipPg && archivePgURI == "" {
 		return fmt.Errorf("--pg-uri is required (or pass --skip-pg to download only)")
 	}
@@ -107,7 +107,7 @@ func runArchive(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	ctx := context.Background()
+	ctx := commandContext(cmd)
 
 	art, err := resolveArtifact(provider.KindArchiveDump)
 	if err != nil {

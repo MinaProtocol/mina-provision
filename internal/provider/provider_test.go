@@ -1,8 +1,10 @@
 package provider
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -179,6 +181,70 @@ providers:
 				t.Fatal("expected the configuration to be rejected")
 			}
 		})
+	}
+}
+
+// An endpoint that is not https is refused when the configuration is loaded,
+// unless it is on a loopback host or the artifact says `insecure: true`.
+func TestPlainHTTPEndpoints(t *testing.T) {
+	const blocks = `
+version: 1
+providers:
+  x:
+    networks:
+      mainnet:
+        precomputed_blocks: {backend: http, base_url: %q, index: %q, name: "m-{height}.json"%s}
+`
+	const apt = `
+version: 1
+providers:
+  x:
+    networks:
+      mainnet:
+        daemon_config: {backend: apt, repository: %q, codename: noble, component: stable, package: p%s}
+`
+	cases := []struct {
+		name string
+		body string
+		ok   bool
+	}{
+		{"https", fmt.Sprintf(blocks, "https://example.com", "https://example.com/i.txt", ""), true},
+		{"http base_url", fmt.Sprintf(blocks, "http://example.com", "https://example.com/i.txt", ""), false},
+		{"http index", fmt.Sprintf(blocks, "https://example.com", "http://example.com/i.txt", ""), false},
+		{"http repository", fmt.Sprintf(apt, "http://example.com", ""), false},
+		{"other scheme", fmt.Sprintf(blocks, "ftp://example.com", "https://example.com/i.txt", ""), false},
+		{"http on 127.0.0.1", fmt.Sprintf(blocks, "http://127.0.0.1:8080", "http://127.0.0.1:8080/i.txt", ""), true},
+		{"http on localhost", fmt.Sprintf(apt, "http://localhost:8080", ""), true},
+		{"http on ::1", fmt.Sprintf(apt, "http://[::1]:8080", ""), true},
+		{"http with insecure", fmt.Sprintf(blocks, "http://example.com", "http://example.com/i.txt", ", insecure: true"), true},
+		{"repository with insecure", fmt.Sprintf(apt, "http://example.com", ", insecure: true"), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, _, err := Load(writeConfig(t, c.body))
+			if c.ok && err != nil {
+				t.Fatalf("rejected: %v", err)
+			}
+			if !c.ok && (err == nil || !strings.Contains(err.Error(), "https")) {
+				t.Fatalf("got %v, want a rejection that names https", err)
+			}
+		})
+	}
+}
+
+// insecure on a backend that has no URL would read as if it changed
+// something.
+func TestInsecureOnlyForURLBackends(t *testing.T) {
+	_, _, err := Load(writeConfig(t, `
+version: 1
+providers:
+  x:
+    networks:
+      mainnet:
+        archive_dump: {backend: gcs, bucket: b, name: "a-{date}", insecure: true}
+`))
+	if err == nil || !strings.Contains(err.Error(), "insecure") {
+		t.Fatalf("got %v, want a rejection of insecure", err)
 	}
 }
 

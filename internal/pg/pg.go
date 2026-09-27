@@ -127,7 +127,7 @@ func parseHeights(out string) ([]int, error) {
 // (-tA) and returns its stdout. Stderr is streamed through so psql connection
 // errors stay visible.
 func query(ctx context.Context, uri, sql string) (string, error) {
-	cmd := exec.CommandContext(ctx, "psql", append(psqlArgs(uri), "-tA", "-c", sql)...)
+	cmd := command(ctx, "psql", append(psqlArgs(uri), "-tA", "-c", sql)...)
 	cmd.Stderr = os.Stderr
 	slog.Debug("exec", "cmd", "psql", "sql", sql)
 	out, err := cmd.Output()
@@ -137,8 +137,23 @@ func query(ctx context.Context, uri, sql string) (string, error) {
 	return string(out), nil
 }
 
-func run(ctx context.Context, name string, args ...string) error {
+// cancelGrace is how long psql has to stop after it is interrupted, before it
+// is killed.
+const cancelGrace = 10 * time.Second
+
+// command is exec.CommandContext with a cancellation psql can act on. The
+// default cancellation kills psql, which leaves the running statement on the
+// server. SIGINT makes psql send a cancel request for that statement, and
+// ON_ERROR_STOP then makes it exit non-zero.
+func command(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = cancelGrace
+	return cmd
+}
+
+func run(ctx context.Context, name string, args ...string) error {
+	cmd := command(ctx, name, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	slog.Debug("exec", "cmd", name, "args", args)

@@ -312,6 +312,24 @@ rejected when the configuration is read:
 A configured check that cannot be performed is a failure, not a silent pass: a
 missing sidecar fails the download.
 
+`checksum: index` proves that the package matches the index. The index itself
+is not checked against a signed `InRelease` file, so it is as trustworthy as
+the https connection and the repository host, and no more. It does not protect
+against a compromised mirror.
+
+### Transport
+
+`base_url`, `index` and `repository` must be `https://` URLs. Plain `http://`
+is accepted only for a loopback host (`localhost`, `127.0.0.0/8`, `::1`), or
+when the artifact sets `insecure: true`, which makes that choice visible in the
+configuration. A redirect from https to plain http is always refused.
+
+A request fails when the response headers do not arrive within 30 s, or when
+one read of the body receives no data for 60 s. There is no limit on the total
+time, so a large dump on a slow link still completes. SIGINT and SIGTERM stop
+the downloads and psql, and the command exits non-zero. See
+[`docs/providers.md`](docs/providers.md#transport).
+
 ## Scope
 
 This tool fetches, verifies and places files. It does not write blocks into an

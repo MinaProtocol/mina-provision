@@ -17,6 +17,8 @@ package provider
 import (
 	_ "embed"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -105,6 +107,12 @@ type Artifact struct {
 	Codename   string `yaml:"codename,omitempty"`   // apt
 	Component  string `yaml:"component,omitempty"`  // apt
 	Package    string `yaml:"package,omitempty"`    // apt
+
+	// Insecure allows plain http for base_url, index and repository. Without
+	// it, only https is accepted, and plain http only to a loopback host.
+	// It is a field, not a default, so that a configuration that gives up
+	// transport security says so where it can be read. See CheckURL.
+	Insecure bool `yaml:"insecure,omitempty"` // http, apt
 }
 
 // databaseName is a name pg_dump writes without quotes, which is also one that
@@ -362,6 +370,14 @@ func (a *Artifact) validate(kind Kind) error {
 		if a.BaseURL == "" {
 			return fmt.Errorf("backend http needs a base_url")
 		}
+		if err := CheckURL("base_url", a.BaseURL, a.Insecure); err != nil {
+			return err
+		}
+		if a.Index != "" {
+			if err := CheckURL("index", a.Index, a.Insecure); err != nil {
+				return err
+			}
+		}
 	case BackendFile:
 		if a.Path == "" {
 			return fmt.Errorf("backend file needs a path")
@@ -372,6 +388,9 @@ func (a *Artifact) validate(kind Kind) error {
 		}
 		if kind != KindDaemonConfig {
 			return fmt.Errorf("backend apt is only meaningful for the daemon_config artifact")
+		}
+		if err := CheckURL("repository", a.Repository, a.Insecure); err != nil {
+			return err
 		}
 	case "":
 		return fmt.Errorf("no backend given (one of gcs, http, file, apt)")
@@ -386,6 +405,10 @@ func (a *Artifact) validate(kind Kind) error {
 	}
 	if a.Checksum == ChecksumIndex && a.Backend != BackendAPT {
 		return fmt.Errorf("checksum: index needs an index to read, which only the apt backend has")
+	}
+
+	if a.Insecure && a.Backend != BackendHTTP && a.Backend != BackendAPT {
+		return fmt.Errorf("insecure is only meaningful for the http and apt backends")
 	}
 
 	if a.Database != "" {
@@ -406,6 +429,48 @@ func (a *Artifact) validate(kind Kind) error {
 		}
 	}
 	return nil
+}
+
+// CheckURL refuses an endpoint that is not https. The http and apt backends
+// trust what the endpoint serves: the apt index digest, the sidecar and the
+// object all come over the same connection, so plain http lets anyone on the
+// network path replace all three together.
+//
+// Plain http is accepted in two cases: the host is a loopback address
+// (localhost, 127.0.0.0/8 or ::1), where no network path exists, or insecure
+// is true, which the configuration states with `insecure: true`. field names
+// the setting, for the error message.
+func CheckURL(field, raw string, insecure bool) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%s %q: %w", field, raw, err)
+	}
+	switch u.Scheme {
+	case "https":
+		if u.Host == "" {
+			return fmt.Errorf("%s %q has no host", field, raw)
+		}
+		return nil
+	case "http":
+		if u.Host == "" {
+			return fmt.Errorf("%s %q has no host", field, raw)
+		}
+		if insecure || isLoopback(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("%s %q is plain http; use https, or set `insecure: true` on this "+
+			"artifact to accept an unauthenticated transport", field, raw)
+	default:
+		return fmt.Errorf("%s %q: scheme must be https (or http with `insecure: true`)", field, raw)
+	}
+}
+
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func sortedKeys[V any](m map[string]V) []string {

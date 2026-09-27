@@ -59,7 +59,7 @@ func init() {
 	blocksCmd.Flags().StringVar(&blocksOut, "out", "./blocks", "Directory to write the block files into.")
 }
 
-func runBlocks(_ *cobra.Command, _ []string) error {
+func runBlocks(cmd *cobra.Command, _ []string) error {
 	if blocksRange == "" {
 		return errors.New("--range is required, e.g. --range 50000-51000 or --range 50000- (open-ended)")
 	}
@@ -84,7 +84,7 @@ func runBlocks(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	ctx := context.Background()
+	ctx := commandContext(cmd)
 	wanted, err := discoverBlocks(ctx, src, art, start, end, openEnded)
 	if err != nil {
 		return err

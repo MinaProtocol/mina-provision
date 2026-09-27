@@ -30,15 +30,75 @@ var TuningSettings = map[string]string{
 	"max_pred_locks_per_transaction": "5000",
 }
 
-// psqlArgs are the arguments every psql call starts with.
+// psqlCmd builds a psql command that connects to uri and then takes args.
+// Every psql call goes through it.
+//
+// The password in uri, from the user info or from a "password" query
+// parameter, is removed from the URI and given to psql in PGPASSWORD. Any
+// local user can read the arguments of a process (ps, /proc/<pid>/cmdline);
+// only the same user and root can read its environment. When uri has no
+// password, psql uses PGPASSWORD or ~/.pgpass as usual.
+//
+// Every call starts with the same arguments:
 //
 //   - -X skips ~/.psqlrc, which could change how a script runs.
 //   - ON_ERROR_STOP=1 makes psql stop at the first failing statement and exit
 //     non-zero. Without it psql carries on after an error and exits 0, so a
 //     failed restore or tuning looked like a success.
 //   - -d keeps a URI that starts with "-" from being read as an option.
-func psqlArgs(uri string) []string {
-	return []string{"-X", "-v", "ON_ERROR_STOP=1", "-d", uri}
+func psqlCmd(ctx context.Context, uri string, args ...string) (*exec.Cmd, error) {
+	u, pw, err := splitPassword(uri)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "psql", append([]string{"-X", "-v", "ON_ERROR_STOP=1", "-d", u.String()}, args...)...)
+	if pw != "" {
+		// A later entry wins over a PGPASSWORD already in the environment.
+		cmd.Env = append(os.Environ(), "PGPASSWORD="+pw)
+	}
+	// Not cmd.Args: only the redacted URI is logged, so that a later
+	// change here cannot put a password in the log.
+	slog.Debug("exec", "cmd", "psql", "uri", u.Redacted(), "args", args)
+	return cmd, nil
+}
+
+// splitPassword returns uri without its password, and the password. A
+// "password" query parameter wins over a password in the user info, as it
+// does in libpq.
+func splitPassword(uri string) (*url.URL, string, error) {
+	u, err := parseURI(uri)
+	if err != nil {
+		return nil, "", err
+	}
+	var pw string
+	if u.User != nil {
+		pw, _ = u.User.Password()
+		name := u.User.Username()
+		u.User = nil
+		if name != "" {
+			u.User = url.User(name)
+		}
+	}
+	// Decoded as libpq decodes it: pairs split at "&", "%XX" escapes and no
+	// "+" for a space, which url.ParseQuery would give. The last password
+	// wins. The other pairs are kept as they are.
+	var kept []string
+	for _, pair := range strings.Split(u.RawQuery, "&") {
+		k, v, _ := strings.Cut(pair, "=")
+		key, kerr := url.PathUnescape(k)
+		val, verr := url.PathUnescape(v)
+		if kerr != nil || verr != nil {
+			return nil, "", fmt.Errorf("--pg-uri has a query parameter that cannot be decoded")
+		}
+		switch {
+		case key == "password":
+			pw = val
+		case pair != "":
+			kept = append(kept, pair)
+		}
+	}
+	u.RawQuery = strings.Join(kept, "&")
+	return u, pw, nil
 }
 
 // ApplyTuning runs ALTER SYSTEM for each TuningSettings entry.
@@ -55,11 +115,11 @@ func ApplyTuning(ctx context.Context, uri string) error {
 	}
 	sort.Strings(keys)
 
-	args := psqlArgs(uri)
+	var args []string
 	for _, k := range keys {
 		args = append(args, "-c", fmt.Sprintf("ALTER SYSTEM SET %s = %s", k, TuningSettings[k]))
 	}
-	return run(ctx, "psql", args...)
+	return run(ctx, uri, args...)
 }
 
 // LoadSQLFile applies the contents of sqlPath to the database at uri.
@@ -71,7 +131,7 @@ func ApplyTuning(ctx context.Context, uri string) error {
 // that already has it stops at that first statement and changes nothing.
 func LoadSQLFile(ctx context.Context, uri, sqlPath string) error {
 	slog.Info("loading sql dump", "path", sqlPath)
-	return run(ctx, "psql", append(psqlArgs(uri), "-f", sqlPath)...)
+	return run(ctx, uri, "-f", sqlPath)
 }
 
 // MaxBlockHeight returns the highest height present in the archive DB's
@@ -127,9 +187,11 @@ func parseHeights(out string) ([]int, error) {
 // (-tA) and returns its stdout. Stderr is streamed through so psql connection
 // errors stay visible.
 func query(ctx context.Context, uri, sql string) (string, error) {
-	cmd := exec.CommandContext(ctx, "psql", append(psqlArgs(uri), "-tA", "-c", sql)...)
+	cmd, err := psqlCmd(ctx, uri, "-tA", "-c", sql)
+	if err != nil {
+		return "", err
+	}
 	cmd.Stderr = os.Stderr
-	slog.Debug("exec", "cmd", "psql", "sql", sql)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("psql query: %w", err)
@@ -137,13 +199,16 @@ func query(ctx context.Context, uri, sql string) (string, error) {
 	return string(out), nil
 }
 
-func run(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+// run runs psql against uri with args, with its output streamed through.
+func run(ctx context.Context, uri string, args ...string) error {
+	cmd, err := psqlCmd(ctx, uri, args...)
+	if err != nil {
+		return err
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	slog.Debug("exec", "cmd", name, "args", args)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s: %w", name, err)
+		return fmt.Errorf("psql: %w", err)
 	}
 	return nil
 }
@@ -286,8 +351,11 @@ func MaintenanceURI(uri, db string) (string, error) {
 func parseURI(uri string) (*url.URL, error) {
 	u, err := url.Parse(uri)
 	if err != nil || (u.Scheme != "postgres" && u.Scheme != "postgresql") {
-		// Not echoed: a URI can hold a password.
-		return nil, fmt.Errorf("--pg-uri must be a postgres:// or postgresql:// URI")
+		// Not echoed: a URI can hold a password. A key=value connection
+		// string is refused too: its password would go to psql as an
+		// argument.
+		return nil, fmt.Errorf("--pg-uri must be a postgres:// or postgresql:// URI; " +
+			"a key=value connection string is not accepted")
 	}
 	return u, nil
 }

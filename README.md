@@ -54,6 +54,19 @@ tuning, and loads the SQL.
 `ALTER SYSTEM` writes to `postgresql.auto.conf`, so PostgreSQL must be
 restarted for the tuning to take effect.
 
+#### The password
+
+`--pg-uri` must be a `postgres://` or `postgresql://` URI. A key=value
+connection string (`host=… password=…`) is refused. `archive` removes the
+password from the URI, from the user info (`user:pw@`) or from a `password`
+query parameter, and gives it to `psql` in `PGPASSWORD`. The password is
+therefore not in the arguments of a `psql` process, which any local user can
+read, and not in the log, also with `-v`.
+
+The password is still in the arguments of `mina-provision` itself. To keep it
+out of them too, leave it out of `--pg-uri` and set `PGPASSWORD` or use
+`~/.pgpass`: `psql` reads both when the URI has no password.
+
 #### Where the dump goes
 
 The published dumps are made with `pg_dump --create`. They start with

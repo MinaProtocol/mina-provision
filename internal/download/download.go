@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"log/slog"
 	"os"
@@ -24,44 +25,84 @@ import (
 )
 
 // GCSObject fetches a single object from a public GCS bucket and writes it
-// to dst. If dst already exists with the same size as the remote object, the
-// download is skipped (idempotent re-runs are cheap).
-func GCSObject(ctx context.Context, bucket, object, dst string) error {
+// to w. The storage client checks the CRC32C of a whole-object read, so a
+// transfer that returns without an error delivered the stored bytes.
+func GCSObject(ctx context.Context, bucket, object string, w io.Writer) error {
 	client, err := storage.NewClient(ctx, option.WithoutAuthentication())
 	if err != nil {
 		return fmt.Errorf("storage client: %w", err)
 	}
 	defer client.Close()
 
-	obj := client.Bucket(bucket).Object(object)
-	attrs, err := obj.Attrs(ctx)
-	if err != nil {
-		return fmt.Errorf("stat gs://%s/%s: %w", bucket, object, err)
-	}
-
-	if stat, err := os.Stat(dst); err == nil && stat.Size() == attrs.Size {
-		slog.Info("destination already matches remote size, skipping download",
-			"path", dst, "size", attrs.Size)
-		return nil
-	}
-
-	reader, err := obj.NewReader(ctx)
+	reader, err := client.Bucket(bucket).Object(object).NewReader(ctx)
 	if err != nil {
 		return fmt.Errorf("open gs://%s/%s: %w", bucket, object, err)
 	}
 	defer reader.Close()
 
-	f, err := os.Create(dst)
-	if err != nil {
-		return fmt.Errorf("create %s: %w", dst, err)
-	}
-	defer f.Close()
-
-	bar := progressbar.DefaultBytes(attrs.Size, fmt.Sprintf("downloading %s", path.Base(object)))
-	if _, err := io.Copy(io.MultiWriter(f, bar), reader); err != nil {
+	bar := progressbar.DefaultBytes(reader.Attrs.Size, fmt.Sprintf("downloading %s", path.Base(object)))
+	if _, err := io.Copy(io.MultiWriter(w, bar), reader); err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
 	return nil
+}
+
+// GCSObjectMatches reports whether the file at dst already holds the content
+// of a GCS object, so that an idempotent re-run does not fetch it again. A dst
+// that does not exist is not a match, and costs no request.
+//
+// The size alone is not enough: a partial or corrupted file of the right size
+// would be accepted. The object's CRC32C is compared with one computed over
+// the local file.
+func GCSObjectMatches(ctx context.Context, bucket, object, dst string) (bool, error) {
+	if _, err := os.Stat(dst); err != nil {
+		return false, nil
+	}
+	client, err := storage.NewClient(ctx, option.WithoutAuthentication())
+	if err != nil {
+		return false, fmt.Errorf("storage client: %w", err)
+	}
+	defer client.Close()
+
+	attrs, err := client.Bucket(bucket).Object(object).Attrs(ctx)
+	if err != nil {
+		return false, fmt.Errorf("stat gs://%s/%s: %w", bucket, object, err)
+	}
+	same, err := fileMatches(dst, attrs.Size, attrs.CRC32C)
+	if err != nil {
+		return false, err
+	}
+	if same {
+		slog.Info("destination already matches the remote object, skipping download",
+			"path", dst, "size", attrs.Size, "crc32c", attrs.CRC32C)
+	}
+	return same, nil
+}
+
+// castagnoli is the CRC32C polynomial table that GCS uses for object
+// checksums.
+var castagnoli = crc32.MakeTable(crc32.Castagnoli)
+
+// fileMatches reports whether the file at path has the given size and CRC32C.
+// The size is compared first, so a file of another size is not read.
+func fileMatches(path string, size int64, crc uint32) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	if stat.Size() != size {
+		return false, nil
+	}
+	sum := crc32.New(castagnoli)
+	if _, err := io.Copy(sum, f); err != nil {
+		return false, fmt.Errorf("checksum %s: %w", path, err)
+	}
+	return sum.Sum32() == crc, nil
 }
 
 // ListGCSObjects returns the names of all objects in a GCS bucket matching

@@ -1,0 +1,12 @@
+mina-logproc          3.3.0-8c0c2e6  amd64
+mina-archive-mainnet  3.3.0-8c0c2e6  amd64
+mina-rosetta-mainnet  3.3.0-8c0c2e6  amd64
+mina-archive          3.3.0-8c0c2e6  amd64
+mina-mainnet          3.3.0-8c0c2e6  amd64
+mina-logproc          3.3.1-7b34378  amd64
+mina-mainnet          3.3.1-7b34378  amd64
+mina-archive          3.3.1-7b34378  amd64
+mina-rosetta-mainnet  3.3.1-7b34378  amd64
+mina-archive-mainnet  3.3.1-7b34378  amd64
+mina-provision        0.0.2          amd64
+mina-provision        0.0.3          amd64

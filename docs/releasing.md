@@ -1,29 +1,36 @@
 # Releasing
 
-A release is a `vX.Y.Z` tag. Pushing it runs the `Release` workflow, which
-builds the binaries, packages them, publishes a GitHub Release, and uploads the
-packages to the signed apt repository.
+A release is a `vX.Y.Z` tag on a commit of `main`. Pushing it runs the
+`Release` workflow, which builds the binaries, packages them, publishes a
+GitHub Release, and uploads the packages to the signed apt repository.
 
 ```bash
+git checkout main && git pull
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+The workflow refuses any other tag before it builds anything: a tag with a
+suffix (`v0.1.0-rc1`), a tag without the `v`, or a tag on a commit that is not
+on `main`. Such a tag publishes nothing: no GitHub Release, no package, no
+versioned image.
 
 ## What the workflow does
 
 | Job | Output |
 |---|---|
-| `release` | static binaries for `amd64` and `arm64`, one `.deb` each, `SHA256SUMS`, a provenance attestation, a GitHub Release with all of them |
+| `release` | a validated tag, `go vet` and `go test` passed, static binaries for `amd64` and `arm64`, one `.deb` each, `SHA256SUMS`, a provenance attestation, a GitHub Release with all of them |
 | `publish-apt` | the same packages in `stable.apt.packages.minaprotocol.com`, component `stable` |
 
 The version is the tag with the leading `v` removed. It is what the `.deb`
 carries and what the verification step looks for.
 
 The `Package` workflow publishes the container image to GHCR in parallel, from
-the same tag. Its `version-match` job then waits for the `amd64` `.deb` in the
-GitHub Release, and fails unless the image and the package report the same
-`--version`. The `docker build` CI job does the same check on every pull
-request, against a package built in the same run.
+the same tag. It applies the same tag check and runs the same tests first. Its
+`version-match` job then waits for the `amd64` `.deb` in the GitHub Release,
+and fails unless the image and the package report the same `--version`. The
+`docker build` CI job does the same check on every pull request, against a
+package built in the same run.
 
 ## What is published where
 
@@ -113,7 +120,7 @@ The role (or, until then, the static keys) needs:
 | `s3:ListBucket` | the bucket | reading the distribution |
 | `s3:GetObject` | `dists/*`, `pool/*` | reading the index and checking for an existing package |
 | `s3:PutObject` | `dists/*`, `pool/*/m/mi/mina-provision*` | the package, the index and the signed `Release` |
-| `s3:DeleteObject` | `dists/*/lockfile*`, `dists/*/*/binary-/lockfile` | releasing and clearing the upload lock |
+| `s3:DeleteObject` | `dists/*/lockfile*` | releasing and clearing the upload lock |
 | `cloudfront:ListDistributions` | `*` | finding the distribution |
 | `cloudfront:CreateInvalidation` | the one distribution | making the new index visible |
 
@@ -164,11 +171,27 @@ asks for does not need a passphrase it has no way to supply.
 files of a distribution on every upload and takes a lock in the bucket to do
 it. Concurrent jobs contend for that lock and can drop each other's entries.
 
+**A release run is not cancelled** (`cancel-in-progress: false`). A run
+cancelled during an upload can skip the unlock of `deb-s3` and leave the lock
+behind in the shared bucket. A second run for the same tag waits for the first
+one. Do not cancel a running `publish-apt` job by hand for the same reason.
+
 **A stale lock is cleared, a live one is not.** A process that dies between
-taking the lock and releasing it blocks every later upload.
+taking the lock and releasing it blocks every later upload to that codename,
+for this tool and for every other Mina package. The `MinaProtocol/deb-s3` fork
+locks per codename, at `dists/<codename>/lockfile` (it first writes
+`dists/<codename>/lockfile.lock`, which blocks nothing).
 `.github/scripts/clear-s3-lock.sh` removes a lock older than five minutes and
 refuses to touch a younger one, because removing a live lock would let two
-writers rewrite the same index.
+writers rewrite the same index. It deletes only the object it examined: the
+delete is conditional on the ETag it read (`delete-object --if-match`), so a
+lock that another upload took in the meantime stays. The ETag of a lock is the
+MD5 of its body, `<user>@<host>`, so a new lock taken by the same user on the
+same host is not told apart from the old one.
+
+**Failed uploads are retried with a back-off.** Up to five attempts, with
+30, 60, 90 and 120 seconds between them, and a stale-lock check before each
+wait.
 
 **`--fail-if-exists`.** A release version must not already be present.
 Overwriting a published package would change what an operator already
@@ -181,7 +204,12 @@ versions are kept.
 
 **The distribution is read back.** The exit status of `deb-s3` is not a reliable
 verdict on its own, so the job lists the distribution afterwards and fails
-unless the new version appears in it.
+unless it has the row `mina-provision <version> <arch>`.
+`.github/scripts/verify-listed.sh` compares whole fields. A search for the
+version string is not enough: the listing holds the other Mina packages too,
+and `0.8.0` as a regular expression matches `mina-archive 3.3.0-8c0c2e6`. CI
+runs this check against a saved listing
+(`.github/scripts/test-release-checks.sh`).
 
 **Checksums and provenance.** `SHA256SUMS` lists the binaries and the
 packages. `actions/attest-build-provenance` signs a statement, through GitHub
@@ -198,7 +226,8 @@ release is invisible.
 
 ```bash
 deb-s3 list --bucket stable.apt.packages.minaprotocol.com --s3-region us-west-2 \
-  --codename noble --component stable --arch amd64 | grep mina-provision
+  --codename noble --component stable --arch amd64 \
+  | .github/scripts/verify-listed.sh mina-provision 0.1.0 amd64
 ```
 
 On a target host:

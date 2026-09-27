@@ -15,7 +15,11 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel a run in progress. A run cancelled during an upload can skip
+  # the unlock of deb-s3 and leave dists/<codename>/lockfile behind in the
+  # shared bucket, which blocks every pipeline that publishes to that
+  # codename. A second run for the same tag waits instead.
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -31,11 +35,28 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The full history, so that the tag can be checked against main.
+          fetch-depth: 0
+
+      # Before anything is built. The trigger accepts any v* tag, and a tag
+      # that is not a plain vX.Y.Z, or not on main, must not reach the stable
+      # repository.
+      - name: Validate the tag
+        run: ./.github/scripts/validate-tag.sh "$GITHUB_REF_NAME" "$GITHUB_SHA"
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+
+      # CI ran on the pull request, but not necessarily on this exact commit
+      # with this toolchain. A release is built only from code that passes.
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
 
       - name: Derive the version from the tag
         id: version
@@ -237,8 +258,16 @@ jobs:
               uploaded=1
               break
             fi
-            echo "attempt $attempt failed; checking for a stale lock"
-            ./.github/scripts/clear-s3-lock.sh "$BUCKET" "$CODENAME" "$COMPONENT" || true
+            if [ "$attempt" -lt 5 ]; then
+              echo "attempt $attempt failed; checking for a stale lock"
+              # deb-s3 locks per codename, so the component is not an input.
+              # A non-zero status means a lock is still held; the next
+              # attempt waits for it.
+              ./.github/scripts/clear-s3-lock.sh "$BUCKET" "$CODENAME" || true
+              # Back off, so that a lock held by another upload has time to
+              # be released instead of the attempts running out at once.
+              sleep $((attempt * 30))
+            fi
           done
           if [ "$uploaded" -ne 1 ]; then
             echo "upload of $deb to ${CODENAME}/${COMPONENT} failed" >&2
@@ -250,14 +279,16 @@ jobs:
           set -euo pipefail
           # The exit status of deb-s3 is not a reliable verdict on its own, so
           # the distribution is read back and the version has to appear in it.
+          # The listing holds every package of the shared repository, so the
+          # match is on the exact package, version and arch fields, not on a
+          # substring of the version.
           listing="$(deb-s3 list \
             --bucket "$BUCKET" \
             --s3-region "$S3_REGION" \
             --codename "$CODENAME" \
             --component "$COMPONENT" \
             --arch "$ARCH")"
-          echo "$listing" | grep -E "^mina-provision" || true
-          if ! echo "$listing" | grep -q "$VERSION"; then
+          if ! echo "$listing" | ./.github/scripts/verify-listed.sh mina-provision "$VERSION" "$ARCH"; then
             echo "mina-provision $VERSION is absent from ${CODENAME}/${COMPONENT}/${ARCH} after upload" >&2
             exit 1
           fi

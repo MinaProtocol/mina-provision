@@ -1,9 +1,14 @@
 package apt
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -60,5 +65,52 @@ func TestExtractDataRejectsNonDeb(t *testing.T) {
 	}
 	if _, err := ExtractData(notADeb, dir); err == nil {
 		t.Fatal("expected an error for a file that is not a .deb")
+	}
+}
+
+// A small package that expands far beyond its size is refused, rather than
+// allowed to fill the disk. The data member here is 4 MiB of zeros, which gzip
+// reduces to a few KiB.
+func TestExtractDataBoundsTheExpansion(t *testing.T) {
+	dir := t.TempDir()
+	var tarGz bytes.Buffer
+	gz := gzip.NewWriter(&tarGz)
+	tw := tar.NewWriter(gz)
+	const size = 4 << 20
+	if err := tw.WriteHeader(&tar.Header{Name: "./big.json", Mode: 0o644, Size: size, Typeflag: tar.TypeReg}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(make([]byte, size)); err != nil {
+		t.Fatal(err)
+	}
+	tw.Close()
+	gz.Close()
+
+	var deb bytes.Buffer
+	deb.WriteString(arMagic)
+	for _, m := range []struct {
+		name string
+		body []byte
+	}{
+		{"debian-binary", []byte("2.0\n")},
+		{"data.tar.gz", tarGz.Bytes()},
+	} {
+		fmt.Fprintf(&deb, "%-16s%-12s%-6s%-6s%-8s%-10d`\n", m.name, "0", "0", "0", "100644", len(m.body))
+		deb.Write(m.body)
+		if len(m.body)%2 == 1 {
+			deb.WriteByte('\n')
+		}
+	}
+	if deb.Len()*maxExpansion >= size {
+		t.Fatalf("the test package is %d bytes, too large to cross the limit", deb.Len())
+	}
+	debPath := filepath.Join(dir, "bomb.deb")
+	if err := os.WriteFile(debPath, deb.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := ExtractData(debPath, filepath.Join(dir, "out"))
+	if err == nil || !strings.Contains(err.Error(), "exceeds the limit") {
+		t.Fatalf("ExtractData = %v, want a size-limit error", err)
 	}
 }

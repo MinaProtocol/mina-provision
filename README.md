@@ -50,6 +50,9 @@ tuning, and loads the SQL.
 | `--work-dir` | where the download and the extracted SQL are written; created if missing. Default: the current directory |
 | `--skip-pg` | download and extract only |
 | `--if-present` | what to do when the database already holds an archive: `import`, `skip`, `fail` |
+| `--max-extract-bytes` | the most bytes the extracted dump may hold; extraction stops with an error above it. Default: 200 GiB |
+
+Only the `.sql` files in the dump are extracted. Other entries are skipped.
 
 `ALTER SYSTEM` writes to `postgresql.auto.conf`, so PostgreSQL must be
 restarted for the tuning to take effect.
@@ -237,9 +240,14 @@ In order; the first file found is used.
 
 1. `--provider-config <path>`
 2. `MINA_PROVISION_CONFIG`
-3. `./mina-provision.yaml`
-4. `$XDG_CONFIG_HOME/mina-provision/config.yaml`
-5. `/etc/mina-provision/config.yaml`
+3. `$XDG_CONFIG_HOME/mina-provision/config.yaml`
+4. `/etc/mina-provision/config.yaml`
+
+**Behaviour change:** `./mina-provision.yaml` in the current directory is no
+longer read automatically. The file can redirect every endpoint, and the tool
+is often run from a directory that others can write to, such as a `--work-dir`
+a dump was extracted into. To use a file in the current directory, name it:
+`--provider-config ./mina-provision.yaml`.
 
 The file is **merged over** the built-in defaults, per provider, per network,
 per artifact. Adding a mirror therefore does not mean restating the default

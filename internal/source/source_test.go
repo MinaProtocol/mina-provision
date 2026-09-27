@@ -53,6 +53,61 @@ func TestFileSourceRefusesEscape(t *testing.T) {
 	}
 }
 
+// A symlink in the directory that points out of it is neither listed nor
+// read. A symlink to a file inside the directory still works.
+func TestFileSourceRefusesSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.json")
+	write(t, outside, "secret")
+	write(t, filepath.Join(root, "real.json"), "real")
+	if err := os.Symlink(outside, filepath.Join(root, "link.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real.json", filepath.Join(root, "inner.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	src, err := New(&provider.Artifact{Backend: provider.BackendFile, Path: root, Name: "x-{height}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := src.List(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(names, ",") != "inner.json,real.json" {
+		t.Errorf("listed %v, want [inner.json real.json]", names)
+	}
+
+	dst := filepath.Join(t.TempDir(), "out")
+	if err := src.Get(context.Background(), "link.json", dst); err == nil {
+		t.Errorf("Get read a file outside the directory: %q", read(t, dst))
+	}
+	if err := src.Get(context.Background(), "inner.json", dst); err != nil {
+		t.Errorf("Get of a symlink inside the directory: %v", err)
+	} else if read(t, dst) != "real" {
+		t.Errorf("wrong content copied")
+	}
+}
+
+// The root directory itself is a valid path.
+func TestFileSourceAtFilesystemRoot(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "x")
+	write(t, file, "x")
+
+	src, err := New(&provider.Artifact{Backend: provider.BackendFile, Path: "/", Name: "x-{height}"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "out")
+	if err := src.Get(context.Background(), strings.TrimPrefix(filepath.ToSlash(file), "/"), dst); err != nil {
+		t.Fatalf("Get with path /: %v", err)
+	}
+	if read(t, dst) != "x" {
+		t.Errorf("wrong content copied")
+	}
+}
+
 func TestHTTPSourceGetWithSidecarChecksum(t *testing.T) {
 	body := "block contents"
 	digest := sha256.Sum256([]byte(body))

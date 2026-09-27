@@ -1,6 +1,12 @@
 package cmd
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/MinaProtocol/mina-provision/internal/provider"
@@ -123,5 +129,66 @@ func TestRestoreTarget(t *testing.T) {
 				t.Errorf("got %q, %q; want %q, %q", db, connect, tt.wantDB, tt.wantConnect)
 			}
 		})
+	}
+}
+
+// archive writes only the .sql of a dump. A provider configuration carried in
+// the archive must not land in --work-dir, where a later run could read it.
+func TestArchiveExtractsOnlyTheSQL(t *testing.T) {
+	dumps, work := t.TempDir(), t.TempDir()
+	const sqlName = "mainnet-archive-dump-2026-09-22_0000.sql"
+	sql, err := os.ReadFile("../internal/pg/testdata/mainnet-archive-dump-head.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, body := range map[string][]byte{
+		sqlName:               sql,
+		"mina-provision.yaml": []byte("version: 1\n"),
+	} {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tw.Close()
+	gz.Close()
+	if err := os.WriteFile(filepath.Join(dumps, sqlName+".tar.gz"), buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(t.TempDir(), "p.yaml")
+	body := fmt.Sprintf(`version: 1
+default_provider: local
+providers:
+  local:
+    networks:
+      mainnet:
+        archive_dump: {backend: file, path: %s, name: "mainnet-archive-dump-{date}_{hour}.sql.tar.gz", checksum: none, database: archive}
+`, dumps)
+	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldConfig, oldNetwork, oldProvider := providerConfig, network, providerName
+	oldDate, oldHour, oldWork, oldSkip := archiveDate, archiveHour, archiveWorkDir, archiveSkipPg
+	t.Cleanup(func() {
+		providerConfig, network, providerName = oldConfig, oldNetwork, oldProvider
+		archiveDate, archiveHour, archiveWorkDir, archiveSkipPg = oldDate, oldHour, oldWork, oldSkip
+	})
+	providerConfig, network, providerName = cfg, "mainnet", ""
+	archiveDate, archiveHour, archiveWorkDir, archiveSkipPg = "2026-09-22", "0000", work, true
+
+	if err := runArchive(nil, nil); err != nil {
+		t.Fatalf("runArchive: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(work, sqlName)); err != nil {
+		t.Errorf("the .sql was not extracted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(work, "mina-provision.yaml")); err == nil {
+		t.Errorf("mina-provision.yaml was extracted into --work-dir")
 	}
 }

@@ -128,8 +128,12 @@ const (
 
 // SearchPaths lists where a user configuration is looked for, in order. The
 // first file that exists is used; it is merged over the built-in defaults.
+//
+// The current directory is not searched. The file can redirect every
+// endpoint, and the tool is run from directories that others can write to,
+// such as a --work-dir a dump was extracted into.
 func SearchPaths() []string {
-	paths := []string{"mina-provision.yaml"}
+	var paths []string
 	if dir, err := os.UserConfigDir(); err == nil {
 		paths = append(paths, filepath.Join(dir, "mina-provision", "config.yaml"))
 	}

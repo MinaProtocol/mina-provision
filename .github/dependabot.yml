@@ -9,3 +9,21 @@ updates:
     groups:
       actions:
         patterns: [ "*" ]
+
+  # Module dependencies. govulncheck in CI reports reachable advisories; this
+  # keeps the versions moving so they are rarely reachable in the first place.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      gomod:
+        patterns: [ "*" ]
+
+  # The GO_IMAGE and BASE_IMAGE build arguments in the Dockerfile. A GO_IMAGE
+  # bump must come with the same toolchain line in go.mod; the "Toolchain
+  # versions agree" CI check fails until both match.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

@@ -2,8 +2,10 @@ package provider
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // Template fields. Making the naming rule data rather than code is what lets a
@@ -71,7 +73,30 @@ func Render(tmpl string, fields map[string]string) (string, error) {
 		}
 		out = strings.ReplaceAll(out, "{"+n+"}", v)
 	}
+	if err := checkName(out); err != nil {
+		return "", err
+	}
 	return out, nil
+}
+
+// checkName refuses a rendered name that could request another object than
+// the one the template describes. The commands validate their flags first;
+// this is the second line of defence. A ".." segment moves up a directory,
+// "?" and "#" end the path of a URL, a backslash is a separator on some hosts,
+// and a control character has no place in an object name.
+func checkName(name string) error {
+	if slices.Contains(strings.Split(name, "/"), "..") {
+		return fmt.Errorf("name %q has a \"..\" path segment", name)
+	}
+	for _, r := range name {
+		switch {
+		case r == '?', r == '#', r == '\\':
+			return fmt.Errorf("name %q contains %q, which is not allowed in an object name", name, r)
+		case unicode.IsControl(r):
+			return fmt.Errorf("name %q contains the control character %U", name, r)
+		}
+	}
+	return nil
 }
 
 // Prefix renders the fields that are known and cuts the template at the first

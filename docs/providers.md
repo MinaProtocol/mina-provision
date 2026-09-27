@@ -281,6 +281,9 @@ name their files differently.
 - A placeholder with no value at fetch time is an error. Leaving it in would
   request a file whose name contains a brace and report a confusing 404.
 - An unbalanced or empty brace is rejected.
+- A rendered name that contains a `..` path segment, `?`, `#`, `\` or a
+  control character is refused before any request. These would request
+  another object than the one the template describes.
 
 ## Checking your file
 

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -111,6 +112,14 @@ func runArchive(cmd *cobra.Command, _ []string) error {
 	default:
 		return fmt.Errorf("--if-present must be import, skip or fail, got %q", archiveIfPresent)
 	}
+	now := time.Now().UTC()
+	date := archiveDate
+	if date == "" {
+		date = now.Format("2006-01-02")
+	}
+	if err := validateDate(date, now); err != nil {
+		return err
+	}
 	if err := validateHour(archiveHour); err != nil {
 		return err
 	}
@@ -162,11 +171,6 @@ func runArchive(cmd *cobra.Command, _ []string) error {
 	src, err := source.New(art)
 	if err != nil {
 		return err
-	}
-
-	date := archiveDate
-	if date == "" {
-		date = time.Now().UTC().Format("2006-01-02")
 	}
 
 	name, err := provider.Render(art.Name, map[string]string{
@@ -291,10 +295,28 @@ func isSQL(name string) bool {
 	return strings.HasSuffix(name, ".sql")
 }
 
-// validateHour checks that an --hour value is a 4-character HHMM string.
+// hourPattern is an hour and a minute of the day, HHMM, from 0000 to 2359.
+var hourPattern = regexp.MustCompile(`^([01][0-9]|2[0-3])[0-5][0-9]$`)
+
+// validateHour checks that an --hour value is a time of day in HHMM form.
 func validateHour(hour string) error {
-	if len(hour) != 4 {
-		return fmt.Errorf("--hour must be 4 digits (HHMM), got %q", hour)
+	if !hourPattern.MatchString(hour) {
+		return fmt.Errorf("--hour must be a time of day in HHMM form, 0000 to 2359, got %q", hour)
+	}
+	return nil
+}
+
+// validateDate checks that a --date value is a calendar date in YYYY-MM-DD
+// form, and that it is not after the current date in UTC: no dump exists for
+// a future date.
+func validateDate(date string, now time.Time) error {
+	d, err := time.Parse("2006-01-02", date)
+	if err != nil {
+		return fmt.Errorf("--date must be a date in YYYY-MM-DD form, got %q", date)
+	}
+	y, m, day := now.UTC().Date()
+	if today := time.Date(y, m, day, 0, 0, 0, 0, time.UTC); d.After(today) {
+		return fmt.Errorf("--date %s is in the future (today is %s, UTC)", date, today.Format("2006-01-02"))
 	}
 	return nil
 }

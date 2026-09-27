@@ -49,6 +49,35 @@ jobs:
       - name: go build
         run: go build ./...
 
+  vulncheck:
+    name: govulncheck
+    # Runs on every pull request and on the daily schedule. A new advisory
+    # against the standard library or a dependency then fails the scheduled
+    # run even when the code has not changed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: govulncheck
+        run: .github/scripts/vulncheck.sh
+
+      - name: Toolchain versions agree
+        # go.mod, the Dockerfile and the Go that CI installs must name the
+        # same release, or the image ships a different compiler than the one
+        # the tests and govulncheck ran with.
+        run: |
+          set -euo pipefail
+          mod="$(go mod edit -json | jq -r '.Toolchain')"
+          img="$(sed -n 's/^ARG GO_IMAGE=golang:\([0-9.]*\)-.*/go\1/p' Dockerfile)"
+          run="$(go env GOVERSION)"
+          echo "go.mod toolchain: $mod"
+          echo "Dockerfile:       $img"
+          echo "installed:        $run"
+          [ "$mod" = "$img" ] && [ "$mod" = "$run" ]
+
   docker:
     name: docker build
     runs-on: ubuntu-latest

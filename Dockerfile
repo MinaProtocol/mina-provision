@@ -8,7 +8,8 @@
 # The image is intentionally not based on mina-archive. This tool does not
 # write to an archive database; applying blocks is mina-archive's own work.
 
-ARG GO_IMAGE=golang:1.21.13-bookworm
+# Keep the Go version the same as the toolchain line in go.mod.
+ARG GO_IMAGE=golang:1.27.1-bookworm
 ARG BASE_IMAGE=debian:bookworm-slim
 
 FROM ${GO_IMAGE} AS builder

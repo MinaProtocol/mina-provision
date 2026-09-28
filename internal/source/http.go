@@ -7,9 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 
+	"github.com/MinaProtocol/mina-provision/internal/httpclient"
 	"github.com/MinaProtocol/mina-provision/internal/provider"
 )
 
@@ -20,15 +20,12 @@ type httpSource struct {
 }
 
 func (h *httpSource) Get(ctx context.Context, name, dst string) error {
-	if err := h.getRaw(ctx, name, dst); err != nil {
-		return err
-	}
-	return verifySidecar(ctx, h, h.artifact, name, dst)
+	return getVerified(ctx, h, h.artifact, name, dst)
 }
 
-func (h *httpSource) getRaw(ctx context.Context, name, dst string) error {
+func (h *httpSource) getRaw(ctx context.Context, name string, w io.Writer) error {
 	url := strings.TrimSuffix(h.artifact.BaseURL, "/") + "/" + strings.TrimPrefix(name, "/")
-	slog.Info("downloading", "url", url, "dst", dst)
+	slog.Info("downloading", "url", url)
 
 	body, err := get(ctx, url)
 	if err != nil {
@@ -36,15 +33,10 @@ func (h *httpSource) getRaw(ctx context.Context, name, dst string) error {
 	}
 	defer body.Close()
 
-	f, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := io.Copy(f, body); err != nil {
+	if _, err := io.Copy(w, body); err != nil {
 		return fmt.Errorf("download %s: %w", url, err)
 	}
-	return f.Close()
+	return nil
 }
 
 // List reads the index the artifact names. A web server cannot be enumerated,
@@ -82,7 +74,7 @@ func get(ctx context.Context, url string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpclient.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("get %s: %w", url, err)
 	}

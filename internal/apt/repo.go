@@ -28,6 +28,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/MinaProtocol/mina-provision/internal/atomicfile"
+	"github.com/MinaProtocol/mina-provision/internal/httpclient"
 )
 
 // Package is one stanza of a Packages index, reduced to the fields needed to
@@ -121,7 +124,9 @@ func Resolve(ctx context.Context, q Query) (Package, error) {
 // The SHA256 published in the index is always checked. A repository fetch that
 // is not verified is only transport security, and the point of preferring the
 // package over an ad-hoc download is that the publisher states what the bytes
-// should be.
+// should be. The index is not checked against a signed InRelease, so the
+// check proves that the package matches the index, not that the index is
+// genuine.
 func Download(ctx context.Context, baseURL string, p Package, dir string) (string, error) {
 	if p.SHA256 == "" {
 		return "", fmt.Errorf("%s %s: index publishes no SHA256; refusing to use an unverifiable package",
@@ -134,7 +139,7 @@ func Download(ctx context.Context, baseURL string, p Package, dir string) (strin
 	if err != nil {
 		return "", err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpclient.Client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("get %s: %w", url, err)
 	}
@@ -143,25 +148,28 @@ func Download(ctx context.Context, baseURL string, p Package, dir string) (strin
 		return "", fmt.Errorf("get %s: %s", url, resp.Status)
 	}
 
+	// The package is placed at dst only when it is complete and its digest
+	// matches, so a failed download leaves nothing that could be unpacked.
 	dst := filepath.Join(dir, filepath.Base(p.Filename))
-	f, err := os.Create(dst)
+	var got string
+	err = atomicfile.Write(dst, func(f *os.File) error {
+		sum := sha256.New()
+		written, err := io.Copy(io.MultiWriter(f, sum), resp.Body)
+		if err != nil {
+			return fmt.Errorf("download %s: %w", url, err)
+		}
+		if p.Size > 0 && written != p.Size {
+			return fmt.Errorf("%s: expected %d bytes, got %d", url, p.Size, written)
+		}
+		got = hex.EncodeToString(sum.Sum(nil))
+		if !strings.EqualFold(got, p.SHA256) {
+			return fmt.Errorf("%s: checksum mismatch (index says %s, download is %s)",
+				url, p.SHA256, got)
+		}
+		return nil
+	})
 	if err != nil {
 		return "", err
-	}
-	defer f.Close()
-
-	sum := sha256.New()
-	written, err := io.Copy(io.MultiWriter(f, sum), resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("download %s: %w", url, err)
-	}
-	if p.Size > 0 && written != p.Size {
-		return "", fmt.Errorf("%s: expected %d bytes, got %d", url, p.Size, written)
-	}
-	got := hex.EncodeToString(sum.Sum(nil))
-	if !strings.EqualFold(got, p.SHA256) {
-		return "", fmt.Errorf("%s: checksum mismatch (index says %s, download is %s)",
-			url, p.SHA256, got)
 	}
 	slog.Info("package verified", "path", dst, "sha256", got)
 	return dst, nil
@@ -175,7 +183,7 @@ func fetchIndex(ctx context.Context, base string) (io.ReadCloser, error) {
 		if err != nil {
 			return nil, err
 		}
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := httpclient.Client.Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -279,7 +287,7 @@ func Components(ctx context.Context, baseURL, codename string) ([]string, error)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpclient.Client.Do(req)
 	if err != nil {
 		return nil, err
 	}

@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/MinaProtocol/mina-provision/internal/download"
 	"github.com/MinaProtocol/mina-provision/internal/provider"
@@ -14,14 +15,20 @@ type gcsSource struct {
 }
 
 func (g *gcsSource) Get(ctx context.Context, name, dst string) error {
-	if err := g.getRaw(ctx, name, dst); err != nil {
+	// An archive dump is gigabytes, so a re-run does not fetch a copy that
+	// is already in place. The copy is compared by content, not by size.
+	same, err := download.GCSObjectMatches(ctx, g.artifact.Bucket, name, dst)
+	if err != nil {
 		return err
 	}
-	return verifySidecar(ctx, g, g.artifact, name, dst)
+	if same {
+		return verifySidecar(ctx, g, g.artifact, name, dst)
+	}
+	return getVerified(ctx, g, g.artifact, name, dst)
 }
 
-func (g *gcsSource) getRaw(ctx context.Context, name, dst string) error {
-	return download.GCSObject(ctx, g.artifact.Bucket, name, dst)
+func (g *gcsSource) getRaw(ctx context.Context, name string, w io.Writer) error {
+	return download.GCSObject(ctx, g.artifact.Bucket, name, w)
 }
 
 func (g *gcsSource) List(ctx context.Context, prefix string) ([]string, error) {

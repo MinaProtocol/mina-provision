@@ -1,6 +1,10 @@
 package apt
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -48,6 +52,34 @@ func TestParsePackagesSelectsByNameAndReadsFields(t *testing.T) {
 	// does not depend on how the repository happened to print it.
 	if p.SHA256 != "1c7313c8da63efbf4c0ddb113da03f9ca6bfd5d59669fb535abe485f41879ea2" {
 		t.Errorf("checksum not normalised: %q", p.SHA256)
+	}
+}
+
+// A package whose digest does not match the index is not left in dir, where
+// the next step would unpack it.
+func TestDownloadWithAWrongDigestLeavesNothing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("not the package"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	p := Package{
+		Name:     "mina-mainnet-config",
+		Version:  "1",
+		Filename: "pool/p.deb",
+		SHA256:   strings.Repeat("0", 64),
+	}
+	_, err := Download(context.Background(), srv.URL, p, dir)
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected a checksum mismatch, got %v", err)
+	}
+	left, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Errorf("files left in dir: %v", left)
 	}
 }
 

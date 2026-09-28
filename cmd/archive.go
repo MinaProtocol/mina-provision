@@ -102,7 +102,7 @@ func init() {
 		"Most bytes the extracted dump may hold. Extraction stops with an error above it.")
 }
 
-func runArchive(_ *cobra.Command, _ []string) error {
+func runArchive(cmd *cobra.Command, _ []string) error {
 	if !archiveSkipPg && archivePgURI == "" {
 		return fmt.Errorf("--pg-uri is required (or pass --skip-pg to download only)")
 	}
@@ -118,7 +118,7 @@ func runArchive(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("--max-extract-bytes must be positive, got %d", archiveMaxExtractBytes)
 	}
 
-	ctx := context.Background()
+	ctx := commandContext(cmd)
 
 	art, err := resolveArtifact(provider.KindArchiveDump)
 	if err != nil {

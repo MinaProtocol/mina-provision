@@ -49,7 +49,9 @@ providers:
           component: stable
           package: mina-mainnet-config
           # The repository index publishes a SHA256 for every package, and it
-          # is always checked.
+          # is always checked. The index itself is not signature-checked: this
+          # repository publishes no InRelease, so the index is trusted as far
+          # as the https connection is.
           checksum: index
         # The fork configuration a forked chain starts from. It is regenerated
         # as the chain advances, so there is one object per network rather than

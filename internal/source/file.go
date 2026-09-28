@@ -21,13 +21,10 @@ type fileSource struct {
 }
 
 func (f *fileSource) Get(ctx context.Context, name, dst string) error {
-	if err := f.getRaw(ctx, name, dst); err != nil {
-		return err
-	}
-	return verifySidecar(ctx, f, f.artifact, name, dst)
+	return getVerified(ctx, f, f.artifact, name, dst)
 }
 
-func (f *fileSource) getRaw(_ context.Context, name, dst string) error {
+func (f *fileSource) getRaw(_ context.Context, name string, w io.Writer) error {
 	// A crafted object name must not read outside the configured directory.
 	// The name is checked here; a symlink in the directory that points out
 	// of it is refused by the root when the file is opened.
@@ -40,22 +37,15 @@ func (f *fileSource) getRaw(_ context.Context, name, dst string) error {
 		return err
 	}
 	defer root.Close()
-	slog.Info("copying", "src", filepath.Join(f.artifact.Path, rel), "dst", dst)
+	slog.Info("copying", "src", filepath.Join(f.artifact.Path, rel))
 
 	in, err := root.Open(rel)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Close()
+	_, err = io.Copy(w, in)
+	return err
 }
 
 func (f *fileSource) List(_ context.Context, prefix string) ([]string, error) {

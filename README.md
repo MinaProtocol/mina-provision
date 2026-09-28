@@ -81,8 +81,8 @@ tuning, and loads the SQL.
 | Flag | Meaning |
 |---|---|
 | `--pg-uri` | the server to restore into; required unless `--skip-pg`. See [Where the dump goes](#where-the-dump-goes) |
-| `--date` | dump date, `YYYY-MM-DD`; defaults to today, UTC |
-| `--hour` | dump hour, `HHMM`; dumps are produced hourly |
+| `--date` | dump date, `YYYY-MM-DD`; defaults to today, UTC. A date after today (UTC) is refused |
+| `--hour` | dump hour, `HHMM`, from `0000` to `2359`; default `0000`. Dumps are produced hourly |
 | `--work-dir` | where the download and the extracted SQL are written; created if missing. Default: the current directory |
 | `--skip-pg` | download and extract only |
 | `--if-present` | what to do when the database already holds an archive: `import`, `skip`, `fail` |
@@ -177,7 +177,8 @@ list. One height can yield several blocks when the chain had competing blocks
 at that height.
 
 An open-ended range stops after 1000 consecutive heights with no block. A
-single run fetches at most 50000 blocks.
+single run fetches at most 50000 blocks, and a closed range can cover at most
+50000 heights. Heights must be from 0 to 9223372036854775806.
 
 ### `daemon-config`
 
@@ -188,7 +189,7 @@ Fetches the runtime configuration a daemon auto-loads.
 | `--out` | directory to write into |
 | `--version` | exact package version; default is the highest |
 | `--repository`, `--component`, `--codename`, `--package` | override the provider's repository settings |
-| `--ref` | git ref, for a provider that serves a source tree |
+| `--ref` | git branch, tag or commit, for a provider that serves a source tree. Letters, digits and `. _ / + @ -` only; no `..` segment, no leading `/` or `-` |
 
 The default provider serves this as a Debian package rather than as a plain
 file, because the daemon auto-loads `/var/lib/coda/config_<hash>.json`, and

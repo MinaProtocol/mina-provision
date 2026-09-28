@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -69,6 +71,9 @@ func init() {
 }
 
 func runConfig(cmd *cobra.Command, _ []string) error {
+	if err := validateRef(configRef); err != nil {
+		return err
+	}
 	art, err := resolveArtifact(provider.KindDaemonConfig)
 	if err != nil {
 		return err
@@ -204,6 +209,29 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Close()
+}
+
+// refPattern is the set of characters --ref accepts. It covers branch names,
+// tags and commit hashes. "+" and "@" are in it because branches of the mina
+// repository use them, for example "compatible+develop". Characters that
+// change what a URL requests, such as "?", "#" and "%", are not.
+var refPattern = regexp.MustCompile(`^[A-Za-z0-9._/+@-]+$`)
+
+// validateRef checks a --ref value before it becomes part of an object name.
+// A ".." segment would request a file outside the tree at that ref, and a
+// leading "/" or "-" is not a git ref.
+func validateRef(ref string) error {
+	if !refPattern.MatchString(ref) {
+		return fmt.Errorf("--ref must be a git branch, tag or commit made of letters, digits "+
+			"and . _ / + @ -, got %q", ref)
+	}
+	if strings.HasPrefix(ref, "/") || strings.HasPrefix(ref, "-") {
+		return fmt.Errorf("--ref must not start with %q, got %q", ref[:1], ref)
+	}
+	if slices.Contains(strings.Split(ref, "/"), "..") {
+		return fmt.Errorf("--ref must not contain a \"..\" path segment, got %q", ref)
+	}
+	return nil
 }
 
 func firstNonEmpty(values ...string) string {

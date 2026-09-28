@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -66,10 +67,6 @@ func runBlocks(cmd *cobra.Command, _ []string) error {
 	start, end, openEnded, err := parseRange(blocksRange)
 	if err != nil {
 		return err
-	}
-	if !openEnded && end-start+1 > maxBlocksPerInvocation {
-		return fmt.Errorf("range %d-%d covers %d blocks, exceeds the %d-block safety cap. "+
-			"Split into smaller ranges and re-run", start, end, end-start+1, maxBlocksPerInvocation)
 	}
 
 	art, err := resolveArtifact(provider.KindPrecomputedBlocks)
@@ -156,37 +153,68 @@ func discoverBlocks(ctx context.Context, src source.Source, art *provider.Artifa
 			return nil, fmt.Errorf("hit %d-block safety cap while walking from %d (currently at height %d). "+
 				"Re-run with a closed --range to fetch the rest", maxBlocksPerInvocation, start, h)
 		}
+		if h == math.MaxInt {
+			// h++ would wrap to a negative height. Only an open-ended range
+			// can get here, because parseRange keeps a closed end below it.
+			break
+		}
 	}
 	return wanted, nil
 }
+
+// maxHeight is the highest height --range accepts. The walk in discoverBlocks
+// stops after end, so end+1 must not overflow.
+const maxHeight = math.MaxInt - 1
 
 // parseRange accepts:
 //
 //	"N"        single height — returns (N, N, false)
 //	"N-"       open-ended    — returns (N, 0, true)
 //	"N-M"      explicit      — returns (N, M, false)
+//
+// Heights must be in 0..maxHeight, and a closed range must not cover more than
+// maxBlocksPerInvocation heights.
 func parseRange(s string) (start, end int, openEnded bool, err error) {
 	if !strings.Contains(s, "-") {
-		v, perr := strconv.Atoi(s)
+		v, perr := parseHeight(s)
 		if perr != nil {
-			return 0, 0, false, fmt.Errorf("range must be N, N-, or N-M; got %q", s)
+			return 0, 0, false, fmt.Errorf("--range must be N, N-, or N-M, with heights from 0 to %d; got %q", maxHeight, s)
 		}
 		return v, v, false, nil
 	}
 	parts := strings.SplitN(s, "-", 2)
-	startV, perr := strconv.Atoi(parts[0])
+	startV, perr := parseHeight(parts[0])
 	if perr != nil {
-		return 0, 0, false, fmt.Errorf("range start must be an integer, got %q", parts[0])
+		return 0, 0, false, fmt.Errorf("--range start must be an integer from 0 to %d, got %q", maxHeight, parts[0])
 	}
 	if parts[1] == "" {
 		return startV, 0, true, nil
 	}
-	endV, perr := strconv.Atoi(parts[1])
+	endV, perr := parseHeight(parts[1])
 	if perr != nil {
-		return 0, 0, false, fmt.Errorf("range end must be an integer, got %q", parts[1])
+		return 0, 0, false, fmt.Errorf("--range end must be an integer from 0 to %d, got %q", maxHeight, parts[1])
 	}
 	if endV < startV {
-		return 0, 0, false, fmt.Errorf("range end (%d) is less than start (%d)", endV, startV)
+		return 0, 0, false, fmt.Errorf("--range end (%d) is less than start (%d)", endV, startV)
+	}
+	// endV-startV cannot overflow, because both are in 0..maxHeight. The
+	// block count, endV-startV+1, can.
+	if endV-startV >= maxBlocksPerInvocation {
+		return 0, 0, false, fmt.Errorf("--range %d-%d covers more than the %d-block safety cap. "+
+			"Split into smaller ranges and re-run", startV, endV, maxBlocksPerInvocation)
 	}
 	return startV, endV, false, nil
+}
+
+// parseHeight parses one height of a --range and checks that it is in
+// 0..maxHeight.
+func parseHeight(s string) (int, error) {
+	v, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, err
+	}
+	if v < 0 || v > maxHeight {
+		return 0, fmt.Errorf("height %d is outside 0..%d", v, maxHeight)
+	}
+	return v, nil
 }

@@ -54,6 +54,17 @@ jobs:
       - name: go build
         run: go build ./...
 
+  release-checks:
+    name: release script tests
+    # The Release workflow runs only on a tag, so a broken check there would
+    # be found only during a release. These tests run the same scripts
+    # offline, against a saved deb-s3 listing and a local git repository.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: verify-listed.sh and validate-tag.sh
+        run: .github/scripts/test-release-checks.sh
+
   vulncheck:
     name: govulncheck
     # Runs on every pull request and on the daily schedule. A new advisory

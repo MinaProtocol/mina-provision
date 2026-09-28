@@ -1,7 +1,8 @@
 name: Package
 
 # Publishes the Docker image to GHCR on every push to main, so the image tag
-# `main` always matches the branch. Release tags are handled by release.yml.
+# `main` always matches the branch. On a release tag it also publishes the
+# versioned image; the .deb packages are handled by release.yml.
 
 on:
   push:
@@ -32,6 +33,27 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The full history, so that a tag can be checked against main.
+          fetch-depth: 0
+
+      # A tag push publishes a versioned image, so it gets the same check as
+      # the Release workflow: a plain vX.Y.Z on main, or nothing is pushed.
+      - name: Validate the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: ./.github/scripts/validate-tag.sh "$GITHUB_REF_NAME" "$GITHUB_SHA"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # An image is pushed only from code that passes, on a tag and on main.
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
 
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1

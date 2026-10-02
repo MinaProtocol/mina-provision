@@ -2,8 +2,11 @@ package pg
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
@@ -81,6 +84,47 @@ func ScanDumpHeader(path string) (DumpHeader, error) {
 		return h, fmt.Errorf("read %s: %w", path, err)
 	}
 	return h, nil
+}
+
+// withoutCreateDatabase returns the dump read from r without its CREATE
+// DATABASE statement for db. Everything else, including the \connect that
+// follows, is passed through unchanged.
+//
+// A dump made with pg_dump --create fails on a server where its database
+// already exists, at that first statement. When the database exists and is
+// empty, as a new PostgreSQL container with POSTGRES_DB makes it, leaving the
+// statement out lets the dump restore into it.
+//
+// Only the header is read here, up to the statement; the rest is streamed.
+// The statement must be on one line, as pg_dump writes it. If the header has
+// no such line, nothing is returned to load.
+func withoutCreateDatabase(r io.Reader, db string) (io.Reader, error) {
+	br := bufio.NewReader(r)
+	var head bytes.Buffer
+	for n := 0; n < headerLines; n++ {
+		line, err := br.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		trimmed := strings.TrimSpace(line)
+		if rest, ok := strings.CutPrefix(trimmed, "CREATE DATABASE "); ok {
+			name, nerr := identifier(rest)
+			if nerr != nil {
+				return nil, nerr
+			}
+			if name == db {
+				if !strings.HasSuffix(trimmed, ";") {
+					return nil, fmt.Errorf("the CREATE DATABASE statement for %q continues past its line", db)
+				}
+				return io.MultiReader(&head, br), nil
+			}
+		}
+		if strings.HasPrefix(trimmed, "CREATE TABLE ") || strings.HasPrefix(trimmed, "COPY ") || errors.Is(err, io.EOF) {
+			break
+		}
+		head.WriteString(line)
+	}
+	return nil, fmt.Errorf("the dump has no CREATE DATABASE statement for %q in its header", db)
 }
 
 // identifier reads the SQL identifier at the start of s: a plain name, which

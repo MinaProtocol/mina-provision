@@ -273,6 +273,37 @@ func TestArchivePgURINamingTheDumpDatabase(t *testing.T) {
 	}
 }
 
+// A new PostgreSQL container with POSTGRES_DB set to the dump's database
+// creates that database, empty. The dump's CREATE DATABASE would fail on it;
+// the dump is restored into it instead.
+func TestArchiveIntoAnExistingEmptyDatabase(t *testing.T) {
+	e := newE2E(t, e2eDB)
+	e.sql("postgres", "CREATE DATABASE "+e2eDB)
+	if out, err := e.run(e2eDB, "skip"); err != nil {
+		t.Fatalf("restore into an existing, empty database: %q, %v", out, err)
+	}
+	if e.rows() != "2" {
+		t.Errorf("%s rows, want 2", e.rows())
+	}
+}
+
+// A database that holds anything of its own is not restored into: the dump's
+// CREATE DATABASE fails, and the database is left as it was.
+func TestArchiveLeavesANonEmptyDatabaseAlone(t *testing.T) {
+	e := newE2E(t, e2eDB)
+	e.sql("postgres", "CREATE DATABASE "+e2eDB)
+	e.sql(e2eDB, "CREATE TABLE notes (body text); INSERT INTO notes VALUES ('keep me')")
+	if out, err := e.run(e2eDB, "import"); err == nil {
+		t.Fatalf("restored into a database that holds a table: %q", out)
+	}
+	if got := e.sql(e2eDB, "SELECT body FROM notes"); got != "keep me" {
+		t.Errorf("notes = %q, want the row to be untouched", got)
+	}
+	if got := e.sql(e2eDB, "SELECT to_regclass('public.blocks') IS NULL"); got != "t" {
+		t.Error("the dump's blocks table was created in the existing database")
+	}
+}
+
 func chdir(t *testing.T, dir string) {
 	t.Helper()
 	old, err := os.Getwd()

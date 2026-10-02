@@ -1,8 +1,10 @@
 package pg
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -19,6 +21,107 @@ func TestScanDumpHeaderOfAPublishedDump(t *testing.T) {
 	}
 	if !h.Restrict {
 		t.Error(`the \restrict line was not seen`)
+	}
+}
+
+// Only the CREATE DATABASE line goes; every other byte of a published dump
+// reaches psql as it is.
+func TestWithoutCreateDatabaseOfAPublishedDump(t *testing.T) {
+	raw, err := os.ReadFile("testdata/mainnet-archive-dump-head.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := withoutCreateDatabase(strings.NewReader(string(raw)), "archive")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var want strings.Builder
+	removed := 0
+	for _, line := range strings.SplitAfter(string(raw), "\n") {
+		if strings.HasPrefix(line, "CREATE DATABASE archive ") {
+			removed++
+			continue
+		}
+		want.WriteString(line)
+	}
+	if removed != 1 {
+		t.Fatalf("the fixture has %d CREATE DATABASE lines, want 1", removed)
+	}
+	if string(got) != want.String() {
+		t.Errorf("output differs from the dump without its CREATE DATABASE line:\n%s", got)
+	}
+	if !strings.Contains(string(got), "\\connect archive\n") {
+		t.Error(`the \connect line was removed too`)
+	}
+}
+
+func TestWithoutCreateDatabase(t *testing.T) {
+	tests := []struct {
+		name    string
+		sql     string
+		db      string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "quoted name",
+			sql:  "SET x = 1;\nCREATE DATABASE \"Odd\" WITH TEMPLATE = template0;\n\\connect \"Odd\"\nCREATE TABLE t (i int);\n",
+			db:   "Odd",
+			want: "SET x = 1;\n\\connect \"Odd\"\nCREATE TABLE t (i int);\n",
+		},
+		{
+			name:    "no CREATE DATABASE",
+			sql:     "SET x = 1;\nCREATE TABLE t (i int);\n",
+			db:      "archive",
+			wantErr: true,
+		},
+		{
+			name:    "CREATE DATABASE for another database",
+			sql:     "CREATE DATABASE other WITH TEMPLATE = template0;\n\\connect other\n",
+			db:      "archive",
+			wantErr: true,
+		},
+		{
+			name:    "statement continues on the next line",
+			sql:     "CREATE DATABASE archive\n  WITH TEMPLATE = template0;\n",
+			db:      "archive",
+			wantErr: true,
+		},
+		{
+			name:    "CREATE DATABASE after the first table is not the header",
+			sql:     "CREATE TABLE t (i int);\nCREATE DATABASE archive;\n",
+			db:      "archive",
+			wantErr: true,
+		},
+		{
+			name:    "empty input",
+			sql:     "",
+			db:      "archive",
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, err := withoutCreateDatabase(strings.NewReader(tt.sql), tt.db)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("no error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _ := io.ReadAll(r)
+			if string(got) != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

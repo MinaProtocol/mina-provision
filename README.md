@@ -115,6 +115,13 @@ the way to reach the server: `postgres://user:pw@host:5432/postgres` and
 `…/archive` both work, also on a new server where `archive` does not exist yet.
 A `--pg-uri` that names another database gets a warning.
 
+When `archive` already exists and is empty, the dump is restored into it: its
+`CREATE DATABASE` statement is left out, and the rest is loaded as it is. A new
+PostgreSQL container with `POSTGRES_DB=archive` makes such a database. "Empty"
+means no tables, views, sequences, functions or types outside the system
+schemas. A database that holds anything is not restored into: the dump stops
+at its `CREATE DATABASE` and the database is left as it was.
+
 The provider's `database` setting says which database a dump creates. It is
 `archive` for the built-in providers. Before a dump is loaded, its header is
 checked against this setting, and a dump that creates a different database is

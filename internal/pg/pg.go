@@ -143,6 +143,73 @@ func LoadSQLFile(ctx context.Context, uri, sqlPath string) error {
 	return run(ctx, uri, "-f", sqlPath)
 }
 
+// LoadSQLFileIntoExisting is LoadSQLFile for a dump that creates the database
+// db, when db already exists and is empty (see EmptyDatabase). The dump is
+// given to psql without its CREATE DATABASE statement, so that it restores
+// into the existing database instead of failing on it.
+func LoadSQLFileIntoExisting(ctx context.Context, uri, sqlPath, db string) error {
+	slog.Info("loading sql dump into the existing database", "path", sqlPath, "database", db)
+	f, err := os.Open(sqlPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	in, err := withoutCreateDatabase(f, db)
+	if err != nil {
+		return fmt.Errorf("%s: %w", sqlPath, err)
+	}
+	cmd, err := psqlCmd(ctx, uri, "-f", "-")
+	if err != nil {
+		return err
+	}
+	cmd.Stdin = in
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("psql: %w", err)
+	}
+	return nil
+}
+
+// emptyDatabaseSQL counts what a database holds outside the system schemas:
+// tables, views, sequences and indexes, functions, and types that are not
+// the row or array type of a table.
+const emptyDatabaseSQL = `SELECT
+  (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_(toast|temp)')
++ (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema'))
++ (SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_(toast|temp)'
+       AND t.typrelid = 0 AND t.typcategory <> 'A')`
+
+// EmptyDatabase reports whether the database db exists on the server at uri,
+// and whether it holds nothing of its own (see emptyDatabaseSQL). uri is used
+// only to reach the server; see MaintenanceURI.
+func EmptyDatabase(ctx context.Context, uri, db string) (exists, empty bool, err error) {
+	admin, err := MaintenanceURI(uri, db)
+	if err != nil {
+		return false, false, err
+	}
+	out, err := queryRetry(ctx, admin,
+		fmt.Sprintf("SELECT count(*) FROM pg_database WHERE datname = %s", quoteLiteral(db)))
+	if err != nil {
+		return false, false, fmt.Errorf("check whether database %q exists: %w", db, err)
+	}
+	if strings.TrimSpace(out) == "0" {
+		return false, false, nil
+	}
+	target, err := WithDatabase(uri, db)
+	if err != nil {
+		return true, false, err
+	}
+	out, err = queryRetry(ctx, target, emptyDatabaseSQL)
+	if err != nil {
+		return true, false, fmt.Errorf("inspect database %q: %w", db, err)
+	}
+	return true, strings.TrimSpace(out) == "0", nil
+}
+
 // MaxBlockHeight returns the highest height present in the archive DB's
 // `blocks` table, or 0 when the table is empty. It is used to work out which
 // precomputed blocks still need to be backfilled after a dump restore.

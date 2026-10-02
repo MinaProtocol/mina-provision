@@ -221,7 +221,23 @@ func runArchive(cmd *cobra.Command, _ []string) error {
 	if err := pg.ApplyTuning(ctx, connectURI); err != nil {
 		return fmt.Errorf("tuning: %w", err)
 	}
-	if err := pg.LoadSQLFile(ctx, connectURI, sqlPath); err != nil {
+	// A dump that creates its database fails at that first statement when the
+	// database already exists. That protects a database with content. An
+	// empty one, as a new PostgreSQL container with POSTGRES_DB makes it, is
+	// restored into instead.
+	load := pg.LoadSQLFile
+	if art.Database != "" {
+		exists, empty, err := pg.EmptyDatabase(ctx, archivePgURI, targetDB)
+		if err != nil {
+			return err
+		}
+		if exists && empty {
+			load = func(ctx context.Context, uri, sqlPath string) error {
+				return pg.LoadSQLFileIntoExisting(ctx, uri, sqlPath, targetDB)
+			}
+		}
+	}
+	if err := load(ctx, connectURI, sqlPath); err != nil {
 		return fmt.Errorf("load: %w", err)
 	}
 

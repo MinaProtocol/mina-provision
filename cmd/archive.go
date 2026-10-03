@@ -94,7 +94,8 @@ up to a minute while the server cannot be reached.`,
 func init() {
 	archiveCmd.Flags().StringVar(&archivePgURI, "pg-uri", "", "PostgreSQL URI (postgres://user:pw@host:port/db). Required unless --skip-pg.")
 	archiveCmd.Flags().StringVar(&archiveDate, "date", "", "Dump date in YYYY-MM-DD form. Defaults to today (UTC).")
-	archiveCmd.Flags().StringVar(&archiveHour, "hour", "0000", "Dump hour in HHMM form (dumps are produced hourly).")
+	archiveCmd.Flags().StringVar(&archiveHour, "hour", hourNewest,
+		"Dump hour in HHMM form. Default: the newest dump of --date (dumps are produced hourly).")
 	archiveCmd.Flags().StringVar(&archiveWorkDir, "work-dir", ".", "Where to download and extract intermediate files. Created if missing.")
 	archiveCmd.Flags().BoolVar(&archiveSkipPg, "skip-pg", false, "Download and extract only; skip the psql restore step.")
 	archiveCmd.Flags().StringVar(&archiveIfPresent, "if-present", ifPresentImport,
@@ -120,8 +121,11 @@ func runArchive(cmd *cobra.Command, _ []string) error {
 	if err := validateDate(date, now); err != nil {
 		return err
 	}
-	if err := validateHour(archiveHour); err != nil {
-		return err
+	newest := archiveHour == hourNewest || archiveHour == "latest"
+	if !newest {
+		if err := validateHour(archiveHour); err != nil {
+			return err
+		}
 	}
 	if archiveMaxExtractBytes <= 0 {
 		return fmt.Errorf("--max-extract-bytes must be positive, got %d", archiveMaxExtractBytes)
@@ -173,11 +177,21 @@ func runArchive(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	name, err := provider.Render(art.Name, map[string]string{
+	var name string
+	if newest {
+		// Without --date, today's newest dump, or yesterday's in the minutes
+		// after midnight UTC before today's first dump is published.
+		days := []string{date}
+		if archiveDate == "" {
+			days = append(days, now.AddDate(0, 0, -1).Format("2006-01-02"))
+		}
+		if name, err = newestDump(ctx, src, art.Name, days); err != nil {
+			return err
+		}
+	} else if name, err = provider.Render(art.Name, map[string]string{
 		provider.FieldDate: date,
 		provider.FieldHour: archiveHour,
-	})
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(archiveWorkDir, 0o755); err != nil {
@@ -304,6 +318,55 @@ func checkDump(ctx context.Context, sqlPath, wantDB string) error {
 		}
 	}
 	return nil
+}
+
+// hourNewest is the default of --hour: the newest dump of the day, found by
+// listing the provider. "latest" means the same.
+const hourNewest = ""
+
+// newestDump returns the name of the newest dump of the first day in days
+// that has one. Dumps are published hourly, so the newest one leaves the
+// fewest blocks for the archive to catch up on after the restore.
+//
+// A listed name counts only if it is the template with the day as {date} and
+// a valid HHMM as {hour}, so a checksum sidecar or another file is not taken
+// for a dump.
+func newestDump(ctx context.Context, src source.Source, tmpl string, days []string) (string, error) {
+	if !strings.Contains(tmpl, "{"+provider.FieldHour+"}") {
+		// One dump a day: nothing to choose.
+		return provider.Render(tmpl, map[string]string{provider.FieldDate: days[0]})
+	}
+	for _, day := range days {
+		prefix, err := provider.Prefix(tmpl, map[string]string{provider.FieldDate: day})
+		if err != nil {
+			return "", err
+		}
+		names, err := src.List(ctx, prefix)
+		if err != nil {
+			return "", fmt.Errorf("list the dumps of %s to find the newest (or pass --hour): %w", day, err)
+		}
+		best, bestHour := "", ""
+		for _, n := range names {
+			hour := strings.TrimPrefix(n, prefix)
+			if len(hour) < 4 || validateHour(hour[:4]) != nil {
+				continue
+			}
+			hour = hour[:4]
+			want, err := provider.Render(tmpl, map[string]string{provider.FieldDate: day, provider.FieldHour: hour})
+			if err != nil || want != n {
+				continue
+			}
+			if hour > bestHour {
+				best, bestHour = n, hour
+			}
+		}
+		if best != "" {
+			slog.Info("newest archive dump", "date", day, "hour", bestHour, "object", best)
+			return best, nil
+		}
+		slog.Info("no archive dump published yet", "date", day)
+	}
+	return "", fmt.Errorf("no archive dump found for %s in %s", strings.Join(days, " or "), src.Describe())
 }
 
 // isSQL selects the tar entries that archive extracts.

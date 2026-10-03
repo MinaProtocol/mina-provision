@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/MinaProtocol/mina-provision/internal/provider"
+	"github.com/MinaProtocol/mina-provision/internal/source"
 )
 
 // The names the default provider produces are the ones the Mina Foundation
@@ -356,5 +358,99 @@ providers:
 	}
 	if _, err := os.Stat(filepath.Join(work, "mina-provision.yaml")); err == nil {
 		t.Errorf("mina-provision.yaml was extracted into --work-dir")
+	}
+}
+
+func TestNewestDump(t *testing.T) {
+	const tmpl = "mainnet-archive-dump-{date}_{hour}.sql.tar.gz"
+	tests := []struct {
+		name    string
+		files   []string
+		tmpl    string
+		days    []string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "newest hour of the day",
+			files: []string{
+				"mainnet-archive-dump-2026-10-03_0000.sql.tar.gz",
+				"mainnet-archive-dump-2026-10-03_0100.sql.tar.gz",
+				"mainnet-archive-dump-2026-10-03_1700.sql.tar.gz",
+				"mainnet-archive-dump-2026-10-02_2300.sql.tar.gz",
+			},
+			days: []string{"2026-10-03", "2026-10-02"},
+			want: "mainnet-archive-dump-2026-10-03_1700.sql.tar.gz",
+		},
+		{
+			name: "sidecars, invalid hours and other names are not dumps",
+			files: []string{
+				"mainnet-archive-dump-2026-10-03_0900.sql.tar.gz",
+				"mainnet-archive-dump-2026-10-03_1000.sql.tar.gz.sha256",
+				"mainnet-archive-dump-2026-10-03_2400.sql.tar.gz",
+				"mainnet-archive-dump-2026-10-03_abcd.sql.tar.gz",
+				"mainnet-archive-dump-2026-10-03_1100.sql",
+				"mainnet-archive-dump-2026-10-03_11000.sql.tar.gz",
+			},
+			days: []string{"2026-10-03"},
+			want: "mainnet-archive-dump-2026-10-03_0900.sql.tar.gz",
+		},
+		{
+			name: "yesterday's newest before today's first dump",
+			files: []string{
+				"mainnet-archive-dump-2026-10-02_2200.sql.tar.gz",
+				"mainnet-archive-dump-2026-10-02_2300.sql.tar.gz",
+			},
+			days: []string{"2026-10-03", "2026-10-02"},
+			want: "mainnet-archive-dump-2026-10-02_2300.sql.tar.gz",
+		},
+		{
+			name:    "an explicit date with no dump",
+			files:   []string{"mainnet-archive-dump-2026-10-02_2300.sql.tar.gz"},
+			days:    []string{"2026-10-03"},
+			wantErr: true,
+		},
+		{
+			name:    "nothing published",
+			days:    []string{"2026-10-03", "2026-10-02"},
+			wantErr: true,
+		},
+		{
+			name: "one dump a day: no {hour} in the template",
+			tmpl: "dump-{date}.sql.tar.gz",
+			days: []string{"2026-10-03", "2026-10-02"},
+			want: "dump-2026-10-03.sql.tar.gz",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range tt.files {
+				if err := os.WriteFile(filepath.Join(dir, f), nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			name := tt.tmpl
+			if name == "" {
+				name = tmpl
+			}
+			src, err := source.New(&provider.Artifact{Backend: "file", Path: dir, Name: name, Checksum: "none"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := newestDump(context.Background(), src, name, tt.days)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("no error, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

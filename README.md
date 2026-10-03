@@ -82,7 +82,7 @@ tuning, and loads the SQL.
 |---|---|
 | `--pg-uri` | the server to restore into; required unless `--skip-pg`. See [Where the dump goes](#where-the-dump-goes) |
 | `--date` | dump date, `YYYY-MM-DD`; defaults to today, UTC. A date after today (UTC) is refused |
-| `--hour` | dump hour, `HHMM`, from `0000` to `2359`; default `0000`. Dumps are produced hourly |
+| `--hour` | dump hour, `HHMM`, from `0000` to `2359`. Default: the newest dump of `--date`, found by listing the provider (`latest` means the same). Without `--date`, yesterday's newest dump is used until today's first one is published, a few minutes after 00:00 UTC. Dumps are produced hourly |
 | `--work-dir` | where the download and the extracted SQL are written; created if missing. Default: the current directory |
 | `--skip-pg` | download and extract only |
 | `--if-present` | what to do when the database already holds an archive: `import`, `skip`, `fail` |

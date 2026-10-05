@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -110,5 +113,91 @@ func TestConstants(t *testing.T) {
 	}
 	if openEndedMissThreshold != 1000 {
 		t.Errorf("openEndedMissThreshold = %d, want 1000", openEndedMissThreshold)
+	}
+}
+
+func TestBlockHeight(t *testing.T) {
+	tests := []struct {
+		tmpl, name string
+		want       int
+		ok         bool
+	}{
+		{"mainnet-{height}-{state_hash}.json", "mainnet-500000-3NKZ1WhC9KPj3kBD.json", 500000, true},
+		// The state hash starts with a digit; it must not be read as the height.
+		{"{state_hash}-{height}.json", "3NKZ1WhC9KPj3kBD-500000.json", 500000, true},
+		{"mainnet-{height}-{state_hash}.json", "devnet-500000-3NKZ.json", 0, false},
+		{"mainnet-{height}-{state_hash}.json", "mainnet-500000-3NKZ.json.sha256", 0, false},
+		{"mainnet-{height}-{state_hash}.json", "mainnet-x-3NKZ.json", 0, false},
+	}
+	for _, tt := range tests {
+		height, err := blockHeight(tt.tmpl)
+		if err != nil {
+			t.Fatalf("%s: %v", tt.tmpl, err)
+		}
+		got, ok := height(tt.name)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("blockHeight(%q)(%q) = %d, %v; want %d, %v", tt.tmpl, tt.name, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+// useBlockDir points the blocks command at a file provider whose directory
+// holds an empty block file for each height given.
+func useBlockDir(t *testing.T, heights ...int) {
+	t.Helper()
+	dir := t.TempDir()
+	for _, h := range heights {
+		name := fmt.Sprintf("mainnet-%d-3NKhash%d.json", h, h)
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := filepath.Join(t.TempDir(), "p.yaml")
+	body := fmt.Sprintf(`version: 1
+providers:
+  local:
+    networks:
+      mainnet:
+        precomputed_blocks: {backend: file, path: %s, name: "mainnet-{height}-{state_hash}.json", checksum: none}
+`, dir)
+	if err := os.WriteFile(cfg, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	setFlag(t, &providerConfig, cfg)
+	setFlag(t, &providerName, "local")
+	setFlag(t, &network, "mainnet")
+	setFlag(t, &blocksOut, t.TempDir())
+}
+
+// A closed range with no block at all is an error, not "fetched 0".
+func TestBlocksClosedRangeWithNoBlockFails(t *testing.T) {
+	useBlockDir(t, 500000, 500001)
+	setFlag(t, &blocksRange, "50000-50010")
+	err := runBlocks(nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "no precomputed blocks at heights 50000-50010") {
+		t.Fatalf("err = %v, want a no-blocks error naming the range", err)
+	}
+}
+
+// Gaps in a closed range are reported, but what exists is fetched.
+func TestBlocksClosedRangeWithGapsSucceeds(t *testing.T) {
+	useBlockDir(t, 500000, 500002)
+	setFlag(t, &blocksRange, "500000-500003")
+	if err := runBlocks(nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := filepath.Glob(filepath.Join(blocksOut, "*.json"))
+	if len(got) != 2 {
+		t.Errorf("fetched %d files, want 2", len(got))
+	}
+}
+
+// Past the tip, an open-ended range finds nothing new. That is a caught-up
+// run, not an error.
+func TestBlocksOpenEndedPastTheTipSucceeds(t *testing.T) {
+	useBlockDir(t, 500000)
+	setFlag(t, &blocksRange, "600000-")
+	if err := runBlocks(nil, nil); err != nil {
+		t.Fatal(err)
 	}
 }

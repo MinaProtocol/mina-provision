@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -45,9 +46,9 @@ prefix, which a bucket does directly and a plain web server can only do with
 an index.
 
 Range formats:
-  --range 50000                single block at height 50000
-  --range 50000-51000          explicit range, inclusive on both ends
-  --range 50000-               open-ended, up to the chain tip
+  --range 500000               single block at height 500000
+  --range 500000-501000        explicit range, inclusive on both ends
+  --range 500000-              open-ended, up to the chain tip
 
 This command only places files on disk. Applying them to an archive database
 is mina-archive's work, and reading them is an indexer's; both take a local
@@ -56,13 +57,13 @@ directory of block files as input.`,
 }
 
 func init() {
-	blocksCmd.Flags().StringVar(&blocksRange, "range", "", "Height range, e.g. 50000-51000 (inclusive), 50000, or 50000- for open-ended. Required.")
+	blocksCmd.Flags().StringVar(&blocksRange, "range", "", "Height range, e.g. 500000-501000 (inclusive), 500000, or 500000- for open-ended. Required.")
 	blocksCmd.Flags().StringVar(&blocksOut, "out", "./blocks", "Directory to write the block files into.")
 }
 
 func runBlocks(cmd *cobra.Command, _ []string) error {
 	if blocksRange == "" {
-		return errors.New("--range is required, e.g. --range 50000-51000 or --range 50000- (open-ended)")
+		return errors.New("--range is required, e.g. --range 500000-501000 or --range 500000- (open-ended)")
 	}
 	start, end, openEnded, err := parseRange(blocksRange)
 	if err != nil {
@@ -87,6 +88,11 @@ func runBlocks(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	slog.Info("found blocks in range", "count", len(wanted), "range_start", start, "open_ended", openEnded)
+	if !openEnded {
+		if err := checkCoverage(wanted, art, start, end, src.Describe()); err != nil {
+			return err
+		}
+	}
 
 	if _, err := downloadBlocks(ctx, src, wanted, blocksOut); err != nil {
 		return err
@@ -95,6 +101,83 @@ func runBlocks(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(os.Stdout, "Fetched %d precomputed blocks from %s into %s\n",
 		len(wanted), src.Describe(), blocksOut)
 	return nil
+}
+
+// checkCoverage reports the heights of a closed range that have no block.
+// A range with no block at all is an error: it is a range before the first
+// published block or after the tip, or the wrong network, and "fetched 0"
+// with a zero exit status would hide that. Some missing heights are only a
+// warning; the publisher's bucket has gaps.
+//
+// An open-ended range is not checked: finding nothing past the tip is how a
+// caught-up run ends.
+func checkCoverage(names []string, art *provider.Artifact, start, end int, from string) error {
+	if len(names) == 0 {
+		return fmt.Errorf("no precomputed blocks at heights %d-%d in %s. "+
+			"Check --network and the range: the bucket may not hold blocks that old or that new", start, end, from)
+	}
+	height, err := blockHeight(art.Name)
+	if err != nil {
+		return err
+	}
+	found := map[int]bool{}
+	for _, n := range names {
+		if h, ok := height(n); ok {
+			found[h] = true
+		}
+	}
+	var missing []int
+	for h := start; h <= end; h++ {
+		if !found[h] {
+			missing = append(missing, h)
+		}
+	}
+	if len(missing) > 0 {
+		first := missing[:min(len(missing), 10)]
+		slog.Warn("some heights in the range have no block", "missing", len(missing), "first", first)
+	}
+	return nil
+}
+
+// blockHeight returns a function that reads the height from a block name.
+// The name must match the whole template, with digits for {height} and any
+// text for {state_hash}, whatever order the template puts them in.
+func blockHeight(tmpl string) (func(name string) (int, bool), error) {
+	var re strings.Builder
+	re.WriteString("^")
+	rest := tmpl
+	for {
+		i := strings.Index(rest, "{")
+		if i < 0 {
+			re.WriteString(regexp.QuoteMeta(rest))
+			break
+		}
+		j := strings.Index(rest[i:], "}")
+		if j < 0 {
+			return nil, fmt.Errorf("name template %q has an unclosed brace", tmpl)
+		}
+		re.WriteString(regexp.QuoteMeta(rest[:i]))
+		if rest[i+1:i+j] == provider.FieldHeight {
+			re.WriteString(`(?P<height>[0-9]+)`)
+		} else {
+			re.WriteString(`.+?`)
+		}
+		rest = rest[i+j+1:]
+	}
+	re.WriteString("$")
+	r, err := regexp.Compile(re.String())
+	if err != nil {
+		return nil, err
+	}
+	idx := r.SubexpIndex("height")
+	return func(name string) (int, bool) {
+		m := r.FindStringSubmatch(name)
+		if m == nil || idx < 0 {
+			return 0, false
+		}
+		h, err := strconv.Atoi(m[idx])
+		return h, err == nil
+	}, nil
 }
 
 // downloadBlocks fetches each named block into outDir and returns the local

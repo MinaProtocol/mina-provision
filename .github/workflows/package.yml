@@ -2,7 +2,8 @@ name: Package
 
 # Publishes the Docker image to GHCR on every push to main, so the image tag
 # `main` always matches the branch. On a release tag it also publishes the
-# versioned image; the .deb packages are handled by release.yml.
+# versioned image, and copies it to Docker Hub when PUBLISH_DOCKERHUB is set;
+# the .deb packages are handled by release.yml.
 
 on:
   push:
@@ -142,3 +143,45 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.docker.outputs.digest }}
         run: |
           .github/scripts/check-version-match.sh "${IMAGE,,}" "dist/mina-provision_${VERSION}_amd64.deb"
+
+  dockerhub:
+    name: copy the image to Docker Hub
+    # A release tag only, after the image and the .deb are known to agree.
+    # Operators who pull the other Mina images from docker.io/minaprotocol
+    # find this one there too. The image is copied by digest, not rebuilt, so
+    # both registries serve the same bytes and the same provenance.
+    #
+    # Inert until the repository variable PUBLISH_DOCKERHUB is "true", so a
+    # release does not fail on a repository that has no Docker Hub token.
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_DOCKERHUB == 'true'
+    needs: [docker, version-match]
+    # The Docker Hub token lives in this environment, which only v* tags can
+    # deploy to; it is not a repository secret.
+    environment: dockerhub-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Copy the image by digest
+        # The owner name has capitals, which an image reference must not have.
+        env:
+          SOURCE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.docker.outputs.digest }}
+          TARGET: docker.io/${{ env.IMAGE_NAME }}
+          VERSION: ${{ needs.docker.outputs.version }}
+        run: .github/scripts/mirror-image.sh "${SOURCE,,}" "${TARGET,,}" "$VERSION" latest

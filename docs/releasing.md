@@ -130,6 +130,46 @@ served from it.
 The bucket is named after the repository, `stable.apt.packages.minaprotocol.com`,
 in `us-west-2`.
 
+### Docker Hub
+
+On a release tag, the `dockerhub` job of the `Package` workflow copies the
+image from GHCR to `docker.io/minaprotocol/mina-provision`, as `<version>` and
+`latest`. It copies the multi-arch index by digest
+(`.github/scripts/mirror-image.sh`), so both registries serve the same bytes,
+platforms and provenance, and it fails unless the copy has the source digest.
+It runs after `version-match`, so an image whose version disagrees with the
+.deb is not copied.
+
+The job does nothing until it is set up (repository admin, once):
+
+1. On Docker Hub, create the repository `minaprotocol/mina-provision`
+   (public), and a Docker Hub access token with **Read & Write** access to
+   that repository only. An organization access token is the better choice:
+   it does not depend on one person's account.
+2. In GitHub, create the environment and give it the token:
+
+   ```bash
+   R=MinaProtocol/mina-provision
+   gh api -X PUT repos/$R/environments/dockerhub-publish \
+     -F 'deployment_branch_policy[protected_branches]=false' \
+     -F 'deployment_branch_policy[custom_branch_policies]=true'
+   gh api -X POST repos/$R/environments/dockerhub-publish/deployment-branch-policies \
+     -f name='v*' -f type=tag
+   gh secret set DOCKERHUB_USERNAME --env dockerhub-publish --repo $R   # the token's user or organization
+   gh secret set DOCKERHUB_TOKEN    --env dockerhub-publish --repo $R
+   gh variable set PUBLISH_DOCKERHUB --body true --repo $R
+   ```
+
+To copy an image that was released before the job was set up, run the script
+by hand after `docker login` to both registries:
+
+```bash
+d=$(docker buildx imagetools inspect ghcr.io/minaprotocol/mina-provision:<version> \
+      --format '{{json .Manifest}}' | jq -r .digest)
+.github/scripts/mirror-image.sh "ghcr.io/minaprotocol/mina-provision@$d" \
+  docker.io/minaprotocol/mina-provision <version> latest
+```
+
 ### Repository settings
 
 These are part of the release's security, not only of this workflow

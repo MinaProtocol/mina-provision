@@ -32,6 +32,12 @@ docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/out:/out" \
   ghcr.io/minaprotocol/mina-provision daemon-config --network mainnet --out /out
 ```
 
+The image is published to GHCR, `ghcr.io/minaprotocol/mina-provision`, and,
+from the release that turns it on, copied to Docker Hub,
+`docker.io/minaprotocol/mina-provision`. Both have the same tags (`<version>`,
+`latest`) and the same digest: the Docker Hub image is a copy, not a second
+build. The `main` tag, built on every push to `main`, is on GHCR only.
+
 The repository key must have this fingerprint. Do not continue if
 `gpg --show-keys` shows a different one:
 

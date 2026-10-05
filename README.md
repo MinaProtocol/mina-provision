@@ -6,7 +6,7 @@ configuration files.
 
 ```bash
 mina-provision archive --network mainnet --pg-uri postgres://...   # a database, from a published dump
-mina-provision blocks  --network mainnet --range 50000-51000       # precomputed blocks, onto disk
+mina-provision blocks  --network mainnet --range 500000-501000     # precomputed blocks, onto disk
 mina-provision daemon-config   --network mainnet --out /var/lib/coda  # the config a daemon auto-loads
 mina-provision genesis-config  --network mainnet                      # the fork config a chain starts from
 ```
@@ -180,9 +180,9 @@ Fetches precomputed block files for a height range.
 
 | Range | Meaning |
 |---|---|
-| `--range 50000` | the blocks at height 50000 |
-| `--range 50000-51000` | inclusive on both ends |
-| `--range 50000-` | open-ended, up to the chain tip |
+| `--range 500000` | the blocks at height 500000 |
+| `--range 500000-501000` | inclusive on both ends |
+| `--range 500000-` | open-ended, up to the chain tip |
 
 A block name embeds the network, the height and the state hash, so a height on
 its own narrows the name only to a prefix, which the provider is then asked to
@@ -192,6 +192,13 @@ at that height.
 An open-ended range stops after 1000 consecutive heights with no block. A
 single run fetches at most 50000 blocks, and a closed range can cover at most
 50000 heights. Heights must be from 0 to 9223372036854775806.
+
+A closed range with no block at all is an error: it usually means the wrong
+network, or a range outside what the bucket holds. The public mainnet bucket
+holds blocks from about height 293000, the chain since the Berkeley upgrade.
+Heights of a closed range that have no block are reported as a warning, and
+the blocks that exist are fetched. An open-ended range that finds nothing new
+succeeds: it is already at the tip.
 
 ### `daemon-config`
 
@@ -286,7 +293,7 @@ one: a mirror, an internal artifact store or a directory on disk is selected
 with `--provider`, with no change to the program.
 
 ```bash
-mina-provision blocks --provider acme-mirror --range 50000-50100
+mina-provision blocks --provider acme-mirror --range 500000-500100
 ```
 
 The built-in defaults are written in the same schema an operator writes, are
@@ -382,6 +389,12 @@ rejected when the configuration is read:
 
 A configured check that cannot be performed is a failure, not a silent pass: a
 missing sidecar fails the download.
+
+The built-in providers use `index` for `daemon_config`. The archive dumps, the
+precomputed blocks and the fork configs use `none`, because their publishers
+do not publish a digest beside them. Those downloads are checked only by the
+https transfer. A mirror that publishes `.sha256` files beside its objects
+should set `checksum: sidecar`.
 
 `checksum: index` proves that the package matches the index. The index itself
 is not checked against a signed `InRelease` file, so it is as trustworthy as
